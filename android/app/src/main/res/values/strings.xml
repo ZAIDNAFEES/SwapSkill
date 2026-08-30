@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SwapSkill</string>
+    <string name="title_activity_main">SwapSkill</string>
+    <string name="package_name">com.swapskill.app</string>
+    <string name="custom_url_scheme">com.swapskill.app</string>
+    <string name="server_client_id">101269763520-resmj9eqouol2ldhmainomj0p5lvvu4e.apps.googleusercontent.com</string>
+</resources>

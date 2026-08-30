@@ -1,0 +1,18 @@
+{
+	"appId": "com.swapskill.app",
+	"appName": "SwapSkill",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	},
+	"plugins": {
+		"GoogleAuth": {
+			"scopes": [
+				"profile",
+				"email"
+			],
+			"serverClientId": "101269763520-resmj9eqouol2ldhmainomj0p5lvvu4e.apps.googleusercontent.com",
+			"forceCodeForRefreshToken": true
+		}
+	}
+}

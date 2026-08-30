@@ -1,0 +1,426 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+/* Android & Universal Mobile App Root Rules - Luxury Warm Ivory & Obsidian Theme */
+html, body {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #F7F4EE;
+  color: #0D0D0F;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+  font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+#root {
+  height: 100%;
+  min-height: 100dvh;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background-color: #F7F4EE;
+  color: #0D0D0F;
+  -webkit-tap-highlight-color: transparent;
+  font-family: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+/* Ensure mobile form fields do not trigger browser auto-zoom on focus */
+input, select, textarea {
+  font-size: 16px !important;
+  touch-action: manipulation;
+}
+
+/* Android Safe Areas */
+.pt-safe {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.pl-safe {
+  padding-left: env(safe-area-inset-left, 0px);
+}
+.pr-safe {
+  padding-right: env(safe-area-inset-right, 0px);
+}
+
+/* Touch Target Minimum (48dp for Android Guidelines) */
+.touch-target {
+  min-height: 48px;
+  min-width: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 60fps Native Hardware Acceleration */
+.gpu-accelerated {
+  transform: translateZ(0);
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+}
+
+/* Mobile Touch Active Feedback */
+button:active, .touch-active:active {
+  transform: scale(0.985);
+  opacity: 0.96;
+  transition: transform 0.1s ease, opacity 0.1s ease;
+}
+
+/* Smooth Universal Inertial Scrolling */
+.mobile-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  scroll-behavior: smooth;
+  touch-action: pan-y;
+}
+
+@theme {
+  --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Plus Jakarta Sans", sans-serif;
+  --font-serif: "Playfair Display", serif;
+  --font-mono: "JetBrains Mono", monospace;
+  
+  --color-luxury-obsidian: #0D0D0F;
+  --color-luxury-ivory: #F7F4EE;
+  --color-luxury-charcoal: #1A1A1D;
+  --color-luxury-gold: #C9A96E;
+  --color-luxury-border: #E8E4DB;
+  --color-luxury-surface: #FFFFFF;
+  --color-luxury-muted: #71717A;
+
+  --color-theme-bg: #F7F4EE;
+  --color-theme-surface: #FFFFFF;
+  --color-theme-surface-secondary: #F2EFE8;
+  --color-theme-card: #FFFFFF;
+  --color-theme-card-hover: #FAF8F4;
+  --color-theme-border: #E8E4DB;
+  --color-theme-primary: #0D0D0F;
+  --color-theme-secondary: #71717A;
+  --color-theme-text-primary: #0D0D0F;
+  --color-theme-text: #0D0D0F;
+  --color-theme-text-secondary: #71717A;
+  --color-theme-accent: #C9A96E;
+  --color-theme-icon: #71717A;
+  --color-theme-danger: #8E2A2A;
+  --color-theme-success: #3D5A45;
+  --color-theme-warning: #C9A96E;
+  --color-theme-input: #FFFFFF;
+  --color-theme-input-border: #E8E4DB;
+  --color-theme-navigation: #FFFFFF;
+  --color-theme-header: #0D0D0F;
+  --color-theme-chat-incoming: #FFFFFF;
+  --color-theme-chat-outgoing: #0D0D0F;
+  
+  --animate-fade-in: fade-in 0.2s ease-out;
+  --animate-slide-up: slide-up 0.2s ease-out;
+  --animate-scale-in: scale-in 0.2s ease-out;
+  --animate-pulse-slow: pulse-slow 3s infinite ease-in-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes scale-in {
+  from { transform: scale(0.98); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.8; }
+}
+
+/* Hide scrollbars globally across all browsers for true native Android experience */
+* {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+::-webkit-scrollbar {
+  display: none !important;
+  width: 0px !important;
+  height: 0px !important;
+  background: transparent !important;
+}
+
+/* Luxury Card Styles */
+.luxury-card {
+  background-color: #FFFFFF !important;
+  border: 1px solid #E8E4DB !important;
+  border-radius: 16px;
+  box-shadow: 0 1px 4px 0 rgba(13, 13, 15, 0.02) !important;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.luxury-card:hover {
+  border-color: #D8D2C5 !important;
+  box-shadow: 0 4px 12px 0 rgba(13, 13, 15, 0.04) !important;
+}
+
+.luxury-card-dark {
+  background-color: #1A1A1D !important;
+  border: 1px solid rgba(201, 169, 110, 0.15) !important;
+  border-radius: 16px;
+  color: #F7F4EE !important;
+}
+
+.luxury-button-primary {
+  background-color: #0D0D0F !important;
+  color: #F7F4EE !important;
+  border: 1px solid #0D0D0F !important;
+  border-radius: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.luxury-button-primary:hover {
+  background-color: #1A1A1D !important;
+  border-color: #C9A96E !important;
+}
+
+.luxury-button-secondary {
+  background-color: #FFFFFF !important;
+  color: #0D0D0F !important;
+  border: 1px solid #E8E4DB !important;
+  border-radius: 12px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+
+.luxury-button-secondary:hover {
+  background-color: #F7F4EE !important;
+  border-color: #D8D2C5 !important;
+}
+
+/* Premium Glassmorphism Connect Button */
+.glass-connect-btn {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88) 0%, rgba(247, 244, 238, 0.68) 100%) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(201, 169, 110, 0.38) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.95), 0 2px 6px -1px rgba(13, 13, 15, 0.04), 0 1px 3px 0 rgba(201, 169, 110, 0.1) !important;
+  color: #0D0D0F !important;
+  font-weight: 500;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.glass-connect-btn:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(247, 244, 238, 0.82) 100%) !important;
+  border-color: rgba(201, 169, 110, 0.65) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 1), 0 4px 12px -2px rgba(13, 13, 15, 0.06), 0 2px 6px 0 rgba(201, 169, 110, 0.16) !important;
+  transform: translateY(-0.5px);
+}
+
+.glass-connect-btn:active {
+  transform: translateY(0) scale(0.985);
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.04), 0 1px 3px 0 rgba(13, 13, 15, 0.04) !important;
+}
+
+/* Connected Glass State */
+.glass-connected-btn {
+  background: linear-gradient(180deg, rgba(242, 239, 232, 0.85) 0%, rgba(235, 230, 220, 0.65) 100%) !important;
+  backdrop-filter: blur(12px) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  border: 1px solid rgba(201, 169, 110, 0.24) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.8), 0 1px 3px 0 rgba(13, 13, 15, 0.03) !important;
+  color: #0D0D0F !important;
+  font-weight: 500;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.glass-connected-btn:hover {
+  background: linear-gradient(180deg, rgba(238, 234, 225, 0.92) 0%, rgba(230, 224, 212, 0.78) 100%) !important;
+  border-color: rgba(201, 169, 110, 0.45) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.9), 0 2px 6px 0 rgba(13, 13, 15, 0.04) !important;
+}
+
+/* Premium Glass Segmented Control Tabs & Dropdown */
+.glass-tab-container {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72) 0%, rgba(247, 244, 238, 0.55) 100%) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border: 1px solid rgba(232, 228, 219, 0.85) !important;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.9), 0 2px 8px -2px rgba(13, 13, 15, 0.03) !important;
+}
+
+.glass-tab-item {
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  color: #71717A;
+}
+
+.glass-tab-item:hover:not(.glass-tab-active) {
+  color: #0D0D0F;
+  background: rgba(255, 255, 255, 0.45);
+}
+
+.glass-tab-active {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(246, 241, 230, 0.92) 100%) !important;
+  border: 1px solid rgba(201, 169, 110, 0.45) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 1), 0 2px 8px -1px rgba(201, 169, 110, 0.18), 0 1px 3px 0 rgba(13, 13, 15, 0.04) !important;
+  color: #0D0D0F !important;
+  font-weight: 600;
+}
+
+/* Glass Filter Dropdown Menu */
+.glass-filter-dropdown-btn {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.85) 0%, rgba(247, 244, 238, 0.70) 100%) !important;
+  backdrop-filter: blur(14px) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
+  border: 1px solid rgba(201, 169, 110, 0.35) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 0.95), 0 2px 8px -1px rgba(13, 13, 15, 0.04), 0 1px 3px 0 rgba(201, 169, 110, 0.08) !important;
+  color: #0D0D0F !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-filter-dropdown-btn:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(247, 244, 238, 0.82) 100%) !important;
+  border-color: rgba(201, 169, 110, 0.6) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 1), 0 4px 12px -2px rgba(13, 13, 15, 0.06), 0 2px 6px 0 rgba(201, 169, 110, 0.14) !important;
+}
+
+.glass-filter-dropdown-menu {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94) 0%, rgba(248, 245, 239, 0.90) 100%) !important;
+  backdrop-filter: blur(20px) !important;
+  -webkit-backdrop-filter: blur(20px) !important;
+  border: 1px solid rgba(201, 169, 110, 0.32) !important;
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.95), 0 10px 30px -4px rgba(13, 13, 15, 0.12), 0 4px 12px -2px rgba(201, 169, 110, 0.12) !important;
+}
+
+.glass-filter-dropdown-item {
+  transition: all 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  color: #4A4A52;
+}
+
+.glass-filter-dropdown-item:hover:not(.glass-filter-dropdown-item-active) {
+  background: rgba(242, 239, 232, 0.65);
+  color: #0D0D0F;
+}
+
+.glass-filter-dropdown-item-active {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95) 0%, rgba(245, 239, 227, 0.90) 100%) !important;
+  border: 1px solid rgba(201, 169, 110, 0.48) !important;
+  box-shadow: inset 0 1px 0.5px rgba(255, 255, 255, 1), 0 2px 6px -1px rgba(201, 169, 110, 0.2) !important;
+  color: #0D0D0F !important;
+  font-weight: 600;
+}
+
+.luxury-button-gold {
+  background-color: #C9A96E !important;
+  color: #0D0D0F !important;
+  border: 1px solid #C9A96E !important;
+  border-radius: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.luxury-button-gold:hover {
+  background-color: #BFA063 !important;
+}
+
+.luxury-tag {
+  background-color: #F2EFE8;
+  color: #0D0D0F;
+  border: 1px solid #E8E4DB;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 10px;
+}
+
+.luxury-tag-gold {
+  background-color: rgba(201, 169, 110, 0.08);
+  color: #0D0D0F;
+  border: 1px solid rgba(201, 169, 110, 0.3);
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+}
+
+/* Strict Luxury Theme Variables */
+:root {
+  --bg: #F7F4EE;
+  --surface: #FFFFFF;
+  --surface-secondary: #F2EFE8;
+  --card: #FFFFFF;
+  --card-hover: #FAF8F4;
+  --border: #E8E4DB;
+  --primary: #0D0D0F;
+  --secondary: #71717A;
+  --text-primary: #0D0D0F;
+  --text-secondary: #71717A;
+  --icon: #71717A;
+  --danger: #8E2A2A;
+  --success: #3D5A45;
+  --warning: #C9A96E;
+  --input: #FFFFFF;
+  --input-border: #E8E4DB;
+  --navigation: #FFFFFF;
+  --header: #0D0D0F;
+  --chat-incoming: #FFFFFF;
+  --chat-outgoing: #0D0D0F;
+
+  --bg-primary: #F7F4EE;
+  --bg-secondary: #F2EFE8;
+  --bg-card: #FFFFFF;
+  --bg-elevated: #FFFFFF;
+  --border-primary: #E8E4DB;
+  --border-secondary: #E8E4DB;
+  --text: #0D0D0F;
+  --text-secondary: #71717A;
+  --text-tertiary: #A1A1AA;
+  --color-accent: #C9A96E;
+  --color-accent-hover: #BFA063;
+  --color-accent-rgb: 201, 169, 110;
+  --shadow-primary: 0 1px 3px 0 rgba(13, 13, 15, 0.04);
+  --shadow-card: 0 1px 3px 0 rgba(13, 13, 15, 0.02);
+  --shadow-hover: 0 4px 12px -2px rgba(13, 13, 15, 0.05);
+  --button-primary-bg: #0D0D0F;
+  --button-primary-text: #F7F4EE;
+  --button-secondary-bg: #FFFFFF;
+  --button-secondary-text: #0D0D0F;
+  --button-secondary-border: #E8E4DB;
+  --scrollbar-thumb: #D8D2C5;
+  --divider-color: #E8E4DB;
+  --skeleton-bg: #EFEBE2;
+  --skeleton-shimmer: #E5E0D5;
+  --nav-bg: #FFFFFF;
+  --nav-border: #E8E4DB;
+  --chat-bubble-self-bg: #0D0D0F;
+  --chat-bubble-self-text: #F7F4EE;
+  --chat-bubble-other-bg: #FFFFFF;
+  --chat-bubble-other-text: #0D0D0F;
+  --avatar-border: #E8E4DB;
+}
+
+/* Skeleton Shimmer for Warm Luxury Mode */
+@keyframes skeleton-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    #EFEBE2 25%,
+    #E5E0D5 37%,
+    #EFEBE2 63%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite linear;
+}

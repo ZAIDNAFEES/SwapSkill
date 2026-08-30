@@ -1,0 +1,43 @@
+name: swapskill
+description: "SwapSkill - Peer-to-Peer Knowledge and Skill Exchange Platform"
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # Firebase Core & Backend
+  firebase_core: ^2.27.0
+  firebase_auth: ^4.17.8
+  cloud_firestore: ^4.15.8
+  firebase_storage: ^11.6.9
+  google_sign_in: ^6.2.1
+
+  # WebRTC Real-Time Audio/Video
+  flutter_webrtc: ^0.9.48
+  permission_handler: ^11.3.0
+
+  # State Management & Architecture
+  provider: ^6.1.2
+
+  # UI, Icons, Typography & Media
+  google_fonts: ^6.1.0
+  lucide_icons: ^0.257.0
+  cached_network_image: ^3.3.1
+  flutter_spinkit: ^5.2.0
+  intl: ^0.19.0
+  uuid: ^4.3.3
+  image_picker: ^1.0.7
+  shared_preferences: ^2.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
