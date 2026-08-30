@@ -1,7 +1,7 @@
 import { Capacitor } from "@capacitor/core";
 
 // Default deployed Vercel backend URL used automatically by native Android/iOS APK builds
-const DEFAULT_PRODUCTION_BACKEND_URL = "https://swap-skill-zns.vercel.app";
+const DEFAULT_PRODUCTION_BACKEND_URL = "https://swap-skill-cnge-jl08xrv3w-zaidnafees-projects.vercel.app";
 
 /**
  * Retrieves the base URL for API requests.
