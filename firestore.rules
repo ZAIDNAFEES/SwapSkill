@@ -1,0 +1,350 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- Global Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Health check & test connectivity (Read-only, writes blocked)
+    match /test/{testId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      // Profiles are readable only by authenticated users (never unauthenticated web scrapers)
+      allow read: if isSignedIn();
+      
+      // Creating user profile (Self only upon signup)
+      allow create: if isOwner(userId);
+      
+      // Updating user profile:
+      // Case A: Owner can update their own profile; identity fields like uid remain immutable
+      // Case B: Non-owners can ONLY update via exact, bounded actions (follower count or verified session reviews)
+      allow update: if (isOwner(userId) && request.resource.data.uid == resource.data.uid) || (
+        isSignedIn() && (
+          // Action 1: Following/unfollowing another user (strictly increment or decrement followersCount by 1 only)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followersCount']) &&
+            (
+              request.resource.data.followersCount == resource.data.followersCount + 1 ||
+              request.resource.data.followersCount == resource.data.followersCount - 1
+            )
+          ) ||
+          // Action 2: Submitting a verified review after a completed swap session
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'reviewCount', 'points', 'swapsCompleted']) &&
+            request.resource.data.reviewCount == resource.data.reviewCount + 1 &&
+            request.resource.data.swapsCompleted == resource.data.swapsCompleted + 1 &&
+            request.resource.data.points == resource.data.points + 20 &&
+            request.resource.data.rating >= 1.0 &&
+            request.resource.data.rating <= 5.0
+          )
+        )
+      );
+      
+      allow delete: if isOwner(userId);
+      
+      // Followers Nested Collection
+      match /followers/{followerId} {
+        allow read: if isSignedIn();
+        allow create, delete: if isSignedIn() && request.auth.uid == followerId;
+      }
+
+      // Following Nested Collection
+      match /following/{followingId} {
+        allow read: if isSignedIn();
+        allow create, delete: if isOwner(userId);
+      }
+
+      // Notifications Nested Collection
+      match /notifications/{notificationId} {
+        allow read, update, delete: if isOwner(userId);
+        allow create: if isSignedIn(); // Authenticated users can send notifications to this user
+      }
+
+      // Saved Profiles Nested Collection
+      match /savedProfiles/{savedId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Blocked Users Nested Collection (Only owner or the specific blocked user can inspect)
+      match /blockedUsers/{blockedId} {
+        allow read: if isOwner(userId) || (isSignedIn() && request.auth.uid == blockedId);
+        allow write: if isOwner(userId);
+      }
+
+      // Availability Nested Collection
+      match /availability/{availId} {
+        allow read: if isSignedIn();
+        allow write: if isOwner(userId);
+      }
+
+      // Security & Private Nested Collections (Strictly owner only)
+      match /security/{secId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /loginHistory/{historyId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /activeDevices/{deviceId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /trustedDevices/{deviceId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // 2. Profiles Collection (Extra profile details, links, etc.)
+    match /profiles/{profileId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(profileId);
+    }
+
+    // 3. Skills Collection (Platform skill catalog)
+    match /skills/{skillId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (
+        request.resource.data.get('creatorId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid ||
+        !('creatorId' in request.resource.data)
+      );
+      allow update, delete: if isSignedIn() && (
+        resource.data.get('creatorId', '') == request.auth.uid ||
+        resource.data.get('userId', '') == request.auth.uid
+      );
+    }
+
+    // 4. UserSkills Collection
+    match /userSkills/{userSkillId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.get('userId', '') == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.get('userId', '') == request.auth.uid;
+    }
+
+    // 5. ChatRooms (chats) Collection
+    match /chats/{chatId} {
+      allow read: if isSignedIn() && (resource == null || resource.data.get('participantIds', []).hasAny([request.auth.uid]));
+      allow create: if isSignedIn() && request.resource.data.get('participantIds', []).hasAny([request.auth.uid]);
+      allow update: if isSignedIn() && (resource == null || resource.data.get('participantIds', []).hasAny([request.auth.uid]));
+      allow delete: if isSignedIn() && resource.data.get('participantIds', []).hasAny([request.auth.uid]);
+      
+      // Messages Nested Collection (Restricted strictly to parent chat participants)
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && (
+          get(/databases/$(database)/documents/chats/$(chatId)).data.get('participantIds', []).hasAny([request.auth.uid])
+        );
+        allow create: if isSignedIn() && (request.auth.uid == request.resource.data.senderId) && (
+          get(/databases/$(database)/documents/chats/$(chatId)).data.get('participantIds', []).hasAny([request.auth.uid])
+        );
+        allow update: if isSignedIn() && (
+          get(/databases/$(database)/documents/chats/$(chatId)).data.get('participantIds', []).hasAny([request.auth.uid])
+        ) && (
+          // Sender can edit their message, preserving senderId
+          (resource.data.senderId == request.auth.uid && request.resource.data.senderId == resource.data.senderId) ||
+          // Other participant can ONLY update read/status receipts or reactions
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'status', 'reactions', 'readAt', 'deliveredAt'])
+        );
+        allow delete: if isSignedIn() && (resource.data.senderId == request.auth.uid);
+      }
+    }
+
+    // 5b. conversations (Symmetrical real-time messaging engine)
+    match /conversations/{conversationId} {
+      allow read: if isSignedIn() && (resource == null || resource.data.get('participantIds', []).hasAny([request.auth.uid]));
+      allow create: if isSignedIn() && request.resource.data.get('participantIds', []).hasAny([request.auth.uid]);
+      allow update: if isSignedIn() && (resource == null || resource.data.get('participantIds', []).hasAny([request.auth.uid]));
+      allow delete: if isSignedIn() && resource.data.get('participantIds', []).hasAny([request.auth.uid]);
+      
+      // Messages Nested Collection (Restricted strictly to parent conversation participants)
+      match /messages/{messageId} {
+        allow read: if isSignedIn() && (
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.get('participantIds', []).hasAny([request.auth.uid])
+        );
+        allow create: if isSignedIn() && (request.auth.uid == request.resource.data.senderId) && (
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.get('participantIds', []).hasAny([request.auth.uid])
+        );
+        allow update: if isSignedIn() && (
+          get(/databases/$(database)/documents/conversations/$(conversationId)).data.get('participantIds', []).hasAny([request.auth.uid])
+        ) && (
+          // Sender can edit their message, preserving senderId
+          (resource.data.senderId == request.auth.uid && request.resource.data.senderId == resource.data.senderId) ||
+          // Other participant can ONLY update read/status receipts or reactions
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'status', 'reactions', 'readAt', 'deliveredAt'])
+        );
+        allow delete: if isSignedIn() && (resource.data.senderId == request.auth.uid);
+      }
+    }
+
+    // 5c. conversationMembers Collection
+    match /conversationMembers/{memberId} {
+      allow read, write: if isSignedIn() && (
+        resource == null ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid
+      );
+    }
+
+    // 5d. typingStatus Collection
+    match /typingStatus/{conversationId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // 5e. readReceipts Collection
+    match /readReceipts/{receiptId} {
+      allow read, write: if isSignedIn() && (
+        resource == null ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid
+      );
+    }
+
+    // 5f. userPresence Collection (Only the user can write their own presence)
+    match /userPresence/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId);
+    }
+
+    // 6. Bookings & Sessions Collections
+    match /bookings/{bookingId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.get('learnerId', '') == request.auth.uid ||
+        resource.data.get('teacherId', '') == request.auth.uid ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid])
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.get('learnerId', '') == request.auth.uid ||
+        request.resource.data.get('teacherId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid ||
+        request.resource.data.get('participantIds', []).hasAny([request.auth.uid])
+      );
+      allow update, delete: if isSignedIn() && (
+        resource.data.get('learnerId', '') == request.auth.uid ||
+        resource.data.get('teacherId', '') == request.auth.uid ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid])
+      );
+    }
+
+    // Sessions Collection (Restricted strictly to actual session participants)
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.teacherId == request.auth.uid ||
+        resource.data.learnerId == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid]) ||
+        resource.data.get('createdBy', '') == request.auth.uid
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.teacherId == request.auth.uid ||
+        request.resource.data.learnerId == request.auth.uid ||
+        request.resource.data.get('participantIds', []).hasAny([request.auth.uid]) ||
+        request.resource.data.get('createdBy', '') == request.auth.uid
+      );
+      allow update: if isSignedIn() && (
+        resource.data.teacherId == request.auth.uid ||
+        resource.data.learnerId == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid]) ||
+        resource.data.get('createdBy', '') == request.auth.uid
+      );
+      allow delete: if isSignedIn() && (
+        resource.data.teacherId == request.auth.uid ||
+        resource.data.learnerId == request.auth.uid ||
+        resource.data.get('createdBy', '') == request.auth.uid
+      );
+    }
+
+    // 7. Reviews Collection (Verified Feedback Ledger)
+    match /reviews/{reviewId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.reviewerId;
+      allow update, delete: if isSignedIn() && request.auth.uid == resource.data.reviewerId;
+    }
+
+    // 8. Reports Collection (Confidential Whistleblower Reporting)
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && request.resource.data.reporterId == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    // 9. Countries Collection (Read-only catalog for signed-in users)
+    match /countries/{countryId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // 10. Languages Collection (Read-only catalog for signed-in users)
+    match /languages/{langId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // 11. LoginLogs Collection (Immutable Audit Logs)
+    match /loginLogs/{logId} {
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    // 12. Calls & Signaling (Restricted strictly to verified caller and receiver)
+    match /calls/{callId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.callerId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid
+      );
+      allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
+      allow update: if isSignedIn() && (
+        resource.data.callerId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid
+      ) && (
+        // Caller and receiver identities cannot be changed during update
+        request.resource.data.callerId == resource.data.callerId &&
+        request.resource.data.receiverId == resource.data.receiverId
+      );
+      allow delete: if isSignedIn() && (
+        resource.data.callerId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid
+      );
+
+      // WebRTC ICE Candidate Subcollections (callerCandidates / receiverCandidates)
+      match /{subcollection}/{candId} {
+        allow read, write: if isSignedIn() && (
+          get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid ||
+          get(/databases/$(database)/documents/calls/$(callId)).data.receiverId == request.auth.uid
+        );
+      }
+    }
+
+    // 13. Call History (Restricted strictly to participants)
+    match /callHistory/{historyId} {
+      allow read, update, delete: if isSignedIn() && (
+        resource == null ||
+        resource.data.callerId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.callerId == request.auth.uid ||
+        request.resource.data.receiverId == request.auth.uid ||
+        request.resource.data.userId == request.auth.uid
+      );
+    }
+
+    // 14. Global Catch-all Default-Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
