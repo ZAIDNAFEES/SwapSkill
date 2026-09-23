@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="AppTheme" parent="Theme.AppCompat.Light.DarkActionBar">
+        <item name="colorPrimary">#0D0D0F</item>
+        <item name="colorPrimaryDark">#F7F4EE</item>
+        <item name="colorAccent">#C9A96E</item>
+    </style>
+    <style name="AppTheme.NoActionBar" parent="AppTheme">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:background">#F7F4EE</item>
+        <item name="android:windowBackground">#F7F4EE</item>
+        <item name="android:colorBackground">#F7F4EE</item>
+        <item name="android:statusBarColor">#F7F4EE</item>
+        <item name="android:navigationBarColor">#F7F4EE</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+    <style name="AppTheme.IncomingCall" parent="Theme.AppCompat.NoActionBar">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+        <item name="android:windowBackground">#0F0F12</item>
+        <item name="android:statusBarColor">#0F0F12</item>
+        <item name="android:navigationBarColor">#0F0F12</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowShowWallpaper">false</item>
+    </style>
+</resources>
