@@ -1,0 +1,380 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User profile with basic statistics and contact info",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "fullName": { "type": "string", "maxLength": 100 },
+        "username": { "type": "string", "maxLength": 30 },
+        "country": { "type": "string" },
+        "countryCode": { "type": "string" },
+        "city": { "type": "string" },
+        "languages": { "type": "array" },
+        "skillsToTeach": { "type": "array" },
+        "skillsToLearn": { "type": "array" },
+        "bio": { "type": "string", "maxLength": 500 },
+        "availability": { "type": "string" },
+        "timezone": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "photoUrl": { "type": "string" },
+        "coverUrl": { "type": "string" },
+        "followersCount": { "type": "integer" },
+        "followingCount": { "type": "integer" },
+        "points": { "type": "integer" },
+        "sessionsCount": { "type": "integer" },
+        "rating": { "type": "number" },
+        "instagram": { "type": "string" },
+        "linkedin": { "type": "string" },
+        "github": { "type": "string" },
+        "portfolio": { "type": "string" },
+        "website": { "type": "string" },
+        "lastLogin": { "type": "string", "format": "date-time" },
+        "lastIP": { "type": "string" },
+        "lastDevice": { "type": "string" },
+        "lastBrowser": { "type": "string" },
+        "lastLocation": { "type": "string" },
+        "loginCount": { "type": "integer" }
+      },
+      "required": ["uid", "email", "fullName", "username"]
+    },
+    "ChatRoom": {
+      "title": "ChatRoom",
+      "description": "A conversation between two people",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "participantIds": { "type": "array" },
+        "lastMessage": { "type": "string", "maxLength": 1000 },
+        "lastMessageSenderId": { "type": "string" },
+        "lastMessageTime": { "type": "string", "format": "date-time" },
+        "unreadCount": { "type": "object" },
+        "mutedUsers": { "type": "array" },
+        "pinnedUsers": { "type": "array" },
+        "archivedUsers": { "type": "array" }
+      },
+      "required": ["id", "participantIds"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "A secure conversational exchange channel between members",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "participantIds": { "type": "array" },
+        "lastMessage": { "type": "string", "maxLength": 1000 },
+        "lastMessageSenderId": { "type": "string" },
+        "lastMessageTime": { "type": "string", "format": "date-time" },
+        "unreadCount": { "type": "object" },
+        "mutedUsers": { "type": "array" },
+        "pinnedUsers": { "type": "array" },
+        "archivedUsers": { "type": "array" }
+      },
+      "required": ["id", "participantIds"]
+    },
+    "ConversationMember": {
+      "title": "ConversationMember",
+      "description": "A join table tracking user memberships inside conversations for extreme normalization",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "conversationId": { "type": "string" },
+        "userId": { "type": "string" },
+        "joinedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId", "userId"]
+    },
+    "TypingStatus": {
+      "title": "TypingStatus",
+      "description": "Real-time user typing indicator tracking inside a conversation",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "conversationId": { "type": "string" },
+        "userIdsTyping": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId"]
+    },
+    "ReadReceipt": {
+      "title": "ReadReceipt",
+      "description": "Specific seen message confirmations for read receipts tracker",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "conversationId": { "type": "string" },
+        "messageId": { "type": "string" },
+        "userId": { "type": "string" },
+        "seenAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId", "messageId", "userId"]
+    },
+    "UserPresence": {
+      "title": "UserPresence",
+      "description": "Real-time user presence (online/offline tracking)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "status": { "type": "string", "enum": ["online", "offline"] },
+        "lastSeen": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "userId", "status"]
+    },
+    "Message": {
+      "title": "Message",
+      "description": "A secure, peer-to-peer message in a ChatRoom",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "senderId": { "type": "string" },
+        "text": { "type": "string", "maxLength": 10000 },
+        "imageUrl": { "type": "string" },
+        "audioUrl": { "type": "string" },
+        "replyToId": { "type": "string" },
+        "replyToText": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["sent", "delivered", "seen"] },
+        "isEdited": { "type": "boolean" }
+      },
+      "required": ["id", "senderId", "text", "timestamp"]
+    },
+    "Session": {
+      "title": "Session",
+      "description": "A booked peer-to-peer exchange session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "teacherId": { "type": "string" },
+        "learnerId": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "learnerName": { "type": "string" },
+        "skillName": { "type": "string" },
+        "status": { "type": "string", "enum": ["requested", "accepted", "completed", "cancelled", "deleted"] },
+        "previousStatus": { "type": "string" },
+        "deletedAt": { "type": "string", "format": "date-time" },
+        "deletedBy": { "type": "string" },
+        "scheduledTime": { "type": "string", "format": "date-time" },
+        "jitsiRoom": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "teacherId", "learnerId", "skillName", "status", "scheduledTime"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "A verification of learning and rating of teachers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "reviewerId": { "type": "string" },
+        "revieweeId": { "type": "string" },
+        "reviewerName": { "type": "string" },
+        "rating": { "type": "integer" },
+        "comment": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "sessionId", "reviewerId", "revieweeId", "rating"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Realtime notification about platform events",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["follower", "booking", "review", "message", "connection"] },
+        "senderId": { "type": "string" },
+        "senderName": { "type": "string" },
+        "senderPhoto": { "type": "string" },
+        "referenceId": { "type": "string" },
+        "message": { "type": "string", "maxLength": 200 },
+        "read": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "type", "createdAt", "message", "read"]
+    },
+    "Report": {
+      "title": "Report",
+      "description": "User misconduct reporting",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reporterId": { "type": "string" },
+        "reportedUserId": { "type": "string" },
+        "reason": { "type": "string", "maxLength": 1000 },
+        "category": { "type": "string" },
+        "comments": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["reporterId", "reportedUserId", "createdAt"]
+    },
+    "BlockedUser": {
+      "title": "BlockedUser",
+      "description": "A user blocked by this member",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "blockedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["blockedAt"]
+    },
+    "LoginLog": {
+      "title": "LoginLog",
+      "description": "Secure admin tracking log for logins",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "ip": { "type": "string" },
+        "country": { "type": "string" },
+        "region": { "type": "string" },
+        "city": { "type": "string" },
+        "isp": { "type": "string" },
+        "browser": { "type": "string" },
+        "browserVersion": { "type": "string" },
+        "os": { "type": "string" },
+        "device": { "type": "string" },
+        "screen": { "type": "string" },
+        "language": { "type": "string" },
+        "timezone": { "type": "string" },
+        "userAgent": { "type": "string" }
+      },
+      "required": ["uid", "email", "timestamp", "ip"]
+    },
+    "CallSignaling": {
+      "title": "CallSignaling",
+      "description": "Real-time voice and video call WebRTC signaling session",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "callerId": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "callerName": { "type": "string" },
+        "callerPhoto": { "type": "string" },
+        "callerUsername": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "receiverPhoto": { "type": "string" },
+        "receiverUsername": { "type": "string" },
+        "type": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "offer": { "type": "object" },
+        "answer": { "type": "object" }
+      },
+      "required": ["id", "callerId", "receiverId", "type", "status", "createdAt"]
+    },
+    "IceCandidate": {
+      "title": "IceCandidate",
+      "description": "WebRTC ICE Candidate wrapper for connection setup",
+      "type": "object",
+      "properties": {
+        "candidate": { "type": "string" },
+        "sdpMid": { "type": "string" },
+        "sdpMLineIndex": { "type": "integer" }
+      },
+      "required": ["candidate"]
+    },
+    "CallHistory": {
+      "title": "CallHistory",
+      "description": "Completed voice/video calls logs ledger",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "callerId": { "type": "string" },
+        "receiverId": { "type": "string" },
+        "callerName": { "type": "string" },
+        "callerPhoto": { "type": "string" },
+        "receiverName": { "type": "string" },
+        "receiverPhoto": { "type": "string" },
+        "type": { "type": "string" },
+        "status": { "type": "string" },
+        "duration": { "type": "integer" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "participants": { "type": "array" }
+      },
+      "required": ["id", "callerId", "receiverId", "type", "status", "duration", "timestamp", "participants"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "UserProfile",
+      "description": "The public and private profile of a registered member"
+    },
+    "chats/{chatId}": {
+      "schema": "ChatRoom",
+      "description": "Active conversational channels"
+    },
+    "chats/{chatId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Secure, real-time client-to-client exchange"
+    },
+    "conversations/{conversationId}": {
+      "schema": "Conversation",
+      "description": "Active conversational channels (rebuild engine)"
+    },
+    "conversations/{conversationId}/messages/{messageId}": {
+      "schema": "Message",
+      "description": "Secure, real-time client-to-client exchange"
+    },
+    "conversationMembers/{memberId}": {
+      "schema": "ConversationMember",
+      "description": "User memberships inside active conversations"
+    },
+    "typingStatus/{conversationId}": {
+      "schema": "TypingStatus",
+      "description": "Active conversational typing status ledger"
+    },
+    "readReceipts/{receiptId}": {
+      "schema": "ReadReceipt",
+      "description": "Seen message read confirmations"
+    },
+    "userPresence/{userId}": {
+      "schema": "UserPresence",
+      "description": "User active network presence"
+    },
+    "sessions/{sessionId}": {
+      "schema": "Session",
+      "description": "Booked learn/teach interactions"
+    },
+    "reviews/{reviewId}": {
+      "schema": "Review",
+      "description": "Verified post-session feedback"
+    },
+    "users/{userId}/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "User notifications ledger"
+    },
+    "users/{userId}/blockedUsers/{blockedId}": {
+      "schema": "BlockedUser",
+      "description": "Blocked users ledger"
+    },
+    "reports/{reportId}": {
+      "schema": "Report",
+      "description": "Misconduct reports"
+    },
+    "loginLogs/{logId}": {
+      "schema": "LoginLog",
+      "description": "Secure admin tracking logs of all successful user logins"
+    },
+    "calls/{callId}": {
+      "schema": "CallSignaling",
+      "description": "Real-time active call signaling session"
+    },
+    "calls/{callId}/callerCandidates/{candId}": {
+      "schema": "IceCandidate",
+      "description": "WebRTC ICE candidates sent by the call initiator"
+    },
+    "calls/{callId}/receiverCandidates/{candId}": {
+      "schema": "IceCandidate",
+      "description": "WebRTC ICE candidates sent by the call receiver"
+    },
+    "callHistory/{historyId}": {
+      "schema": "CallHistory",
+      "description": "Completed calls logs history ledger"
+    }
+  }
+}
