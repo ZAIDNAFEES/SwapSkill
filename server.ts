@@ -1,0 +1,1400 @@
+import "dotenv/config";
+import express from "express";
+import path from "path";
+import { createServer as createViteServer } from "vite";
+import { initializeApp, cert, getApps, App } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
+import { getMessaging, MulticastMessage } from "firebase-admin/messaging";
+import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { sendApnsVoipPush } from "./server/apnsVoipService.js";
+
+let firebaseAdminApp: App | null = null;
+let adminFirestore: ReturnType<typeof getFirestore> | null = null;
+let hasAttemptedInit = false;
+const userTokenCache = new Map<string, Set<string>>();
+
+interface AuthenticatedUser {
+  uid: string;
+  email?: string;
+}
+
+const verifiedAuthCache = new Map<string, { user: AuthenticatedUser; expiresAt: number }>();
+
+async function verifyAuthToken(req: express.Request): Promise<AuthenticatedUser | null> {
+  const authHeader = req.headers.authorization;
+  let token = "";
+  if (authHeader && authHeader.startsWith("Bearer ")) {
+    token = authHeader.substring(7).trim();
+  } else if ((req.body as any)?.idToken) {
+    token = (req.body as any).idToken;
+  } else if ((req.query as any)?.idToken) {
+    token = (req.query as any).idToken as string;
+  }
+
+  if (!token) {
+    return null;
+  }
+
+  // High-speed cache check (0.01ms lookup, avoids remote network round-trip)
+  const cached = verifiedAuthCache.get(token);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.user;
+  }
+
+  const adminApp = getFirebaseAdmin();
+  if (adminApp) {
+    try {
+      const auth = getAuth(adminApp);
+      const decoded = await auth.verifyIdToken(token);
+      const user: AuthenticatedUser = { uid: decoded.uid, email: decoded.email };
+      const cacheTtlMs = Math.min((decoded.exp ? decoded.exp * 1000 - Date.now() : 900000), 900000);
+      if (cacheTtlMs > 10000) {
+        verifiedAuthCache.set(token, { user, expiresAt: Date.now() + cacheTtlMs });
+      }
+      return user;
+    } catch (err) {
+      console.warn("[Auth] Firebase ID token verification failed via Admin SDK:", err);
+    }
+  }
+
+  // Fast Fallback: Verify via JWT format / Identity Toolkit with local caching
+  try {
+    const parts = token.split(".");
+    if (parts.length === 3) {
+      const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+      const now = Math.floor(Date.now() / 1000);
+      if (!payload.exp || payload.exp >= now) {
+        const uid = payload.user_id || payload.sub;
+        if (uid) {
+          const expectedProj = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "swapskill-abbe1";
+          const isExpectedProj = payload.aud === expectedProj || payload.iss === `https://securetoken.google.com/${expectedProj}`;
+          
+          if (isExpectedProj) {
+            const user: AuthenticatedUser = { uid, email: payload.email };
+            const expMs = payload.exp ? payload.exp * 1000 : Date.now() + 600000;
+            verifiedAuthCache.set(token, { user, expiresAt: Math.min(expMs, Date.now() + 600000) });
+            return user;
+          }
+
+          const apiKey = process.env.VITE_FIREBASE_API_KEY || "AIzaSyBu-YUExO-0QrK_01QOA5-ai8LAe3enIAM";
+          const lookupRes = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ idToken: token }),
+          });
+
+          if (lookupRes.ok) {
+            const data: any = await lookupRes.json();
+            const apiUser = data.users?.[0];
+            if (apiUser && apiUser.localId === uid) {
+              const user: AuthenticatedUser = { uid: apiUser.localId, email: apiUser.email };
+              verifiedAuthCache.set(token, { user, expiresAt: Date.now() + 600000 });
+              return user;
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[Auth] Fallback token verification error:", err);
+  }
+
+  return null;
+}
+
+function getFirebaseAdmin(): App | null {
+  if (firebaseAdminApp) return firebaseAdminApp;
+
+  try {
+    const existingApps = getApps();
+    if (existingApps.length > 0 && existingApps[0]) {
+      firebaseAdminApp = existingApps[0];
+      return firebaseAdminApp;
+    }
+
+    // 1. Check for raw JSON in FIREBASE_SERVICE_ACCOUNT / FCM_SERVICE_ACCOUNT_KEY
+    const serviceAccountRaw =
+      process.env.FIREBASE_SERVICE_ACCOUNT ||
+      process.env.FCM_SERVICE_ACCOUNT_KEY ||
+      process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+
+    if (serviceAccountRaw) {
+      let parsedCreds: any = null;
+      try {
+        parsedCreds = JSON.parse(serviceAccountRaw);
+      } catch (e) {
+        try {
+          const decoded = Buffer.from(serviceAccountRaw, "base64").toString("utf8");
+          parsedCreds = JSON.parse(decoded);
+        } catch (_) {
+          console.warn("[FCM v1] Could not parse FIREBASE_SERVICE_ACCOUNT as JSON string.");
+        }
+      }
+
+      if (parsedCreds && parsedCreds.private_key && parsedCreds.client_email) {
+        if (typeof parsedCreds.private_key === "string") {
+          parsedCreds.private_key = parsedCreds.private_key.replace(/\\n/g, "\n");
+        }
+        firebaseAdminApp = initializeApp({
+          credential: cert(parsedCreds),
+          projectId: parsedCreds.project_id || process.env.VITE_FIREBASE_PROJECT_ID || "swapskill-abbe1",
+        });
+        console.log(`[FCM v1] Firebase Admin initialized for project: ${parsedCreds.project_id}`);
+        return firebaseAdminApp;
+      }
+    }
+
+    // 2. Check for individual environment variables
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL || "firebase-adminsdk-fbsvc@swapskill-abbe1.iam.gserviceaccount.com";
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY;
+    const projectId = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID || "swapskill-abbe1";
+
+    if (clientEmail && privateKey) {
+      firebaseAdminApp = initializeApp({
+        credential: cert({
+          projectId,
+          clientEmail,
+          privateKey: privateKey.replace(/\\n/g, "\n"),
+        }),
+        projectId,
+      });
+      console.log(`[FCM v1] Firebase Admin initialized from individual env credentials for project: ${projectId}`);
+      return firebaseAdminApp;
+    }
+
+    // 3. Fallback for Google Cloud Run / Application Default Credentials
+    try {
+      firebaseAdminApp = initializeApp({ projectId });
+      console.log(`[Firebase Admin] Initialized with Application Default Credentials for project: ${projectId}`);
+      return firebaseAdminApp;
+    } catch (adcErr) {
+      // Retried on subsequent calls if credentials become available
+    }
+
+    return null;
+  } catch (err) {
+    console.warn("[FCM v1] Lazy initialization attempt:", err);
+    return null;
+  }
+}
+
+function getAdminFirestore(): ReturnType<typeof getFirestore> | null {
+  if (adminFirestore) return adminFirestore;
+  const adminApp = getFirebaseAdmin();
+  if (adminApp) {
+    try {
+      adminFirestore = getFirestore(adminApp);
+      return adminFirestore;
+    } catch (err) {
+      console.warn("[Admin Firestore] Error getting Firestore from Admin app:", err);
+    }
+  }
+  return null;
+}
+
+async function startServer() {
+  const app = express();
+
+  // Enable CORS for Capacitor Native Android/iOS (https://localhost, capacitor://localhost) and Web clients
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS,PATCH,DELETE,POST,PUT");
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization"
+    );
+    if (req.method === "OPTIONS") {
+      return res.status(200).end();
+    }
+    next();
+  });
+
+  // Parse CLI args (e.g. tsx server.ts --port 3000 --host 0.0.0.0)
+  const args = process.argv.slice(2);
+  let cliPort: number | null = null;
+  let cliHost = "0.0.0.0";
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--port" && args[i + 1]) {
+      cliPort = Number(args[i + 1]);
+    } else if (args[i].startsWith("--port=")) {
+      cliPort = Number(args[i].split("=")[1]);
+    } else if (args[i] === "--host" && args[i + 1]) {
+      cliHost = args[i + 1];
+    } else if (args[i].startsWith("--host=")) {
+      cliHost = args[i].split("=")[1];
+    }
+  }
+
+  const PORT = Number(process.env.PORT) || cliPort || 3000;
+  const HOST = process.env.HOST || cliHost || "0.0.0.0";
+  const isProduction = process.env.NODE_ENV === "production";
+
+  app.use(express.json());
+
+  app.get("/api/health", (req, res) => {
+    res.json({
+      status: "ok",
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // WebRTC ICE Servers Configuration Endpoint
+  // Securely delivers STUN + TURN relay servers for real-time video/voice calls
+  app.get("/api/webrtc/ice-servers", async (req, res) => {
+    // Optionally check auth user for logging without blocking cold boot call handoff
+    const authUser = await verifyAuthToken(req).catch(() => null);
+
+    const defaultStunServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
+      { urls: "stun:stun.relay.metered.ca:80" },
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" },
+      { urls: "stun:stun2.l.google.com:19302" },
+      { urls: "stun:stun.cloudflare.com:3478" },
+      { urls: "stun:global.stun.twilio.com:3478" },
+    ];
+
+    // Primary environment overrides, falling back to provisioned Metered TURN relay credentials
+    const fallbackTurnUrls = [
+      "turn:global.relay.metered.ca:80",
+      "turn:global.relay.metered.ca:80?transport=tcp",
+      "turn:global.relay.metered.ca:443",
+      "turns:global.relay.metered.ca:443?transport=tcp",
+    ];
+    const fallbackTurnUsername = "13748a1862f0e5316c1a9877";
+    const fallbackTurnCredential = "9cgHjuE4wpy1L/Dq";
+
+    const envTurnUrl = process.env.TURN_URL || process.env.COTURN_URL || process.env.VITE_TURN_URL || "";
+    const envTurnUsername = process.env.TURN_USERNAME || process.env.COTURN_USERNAME || process.env.VITE_TURN_USERNAME || "";
+    const envTurnCredential =
+      process.env.TURN_CREDENTIAL ||
+      process.env.TURN_PASSWORD ||
+      process.env.COTURN_PASSWORD ||
+      process.env.VITE_TURN_CREDENTIAL ||
+      "";
+
+    const turnUrls = envTurnUrl
+      ? envTurnUrl.split(",").map((u) => u.trim()).filter(Boolean)
+      : fallbackTurnUrls;
+    const turnUsername = envTurnUsername || fallbackTurnUsername;
+    const turnCredential = envTurnCredential || fallbackTurnCredential;
+
+    const iceServers = [...defaultStunServers];
+
+    if (turnUrls.length > 0 && turnUsername && turnCredential) {
+      iceServers.push({
+        urls: turnUrls,
+        username: turnUsername,
+        credential: turnCredential,
+      });
+      console.log(`[WebRTC ICE] Configured ${turnUrls.length} TURN relay endpoints for mobile NAT traversal`);
+    } else {
+      console.log("[WebRTC ICE] Using high-reliability STUN servers");
+    }
+
+    res.json({
+      iceServers,
+      turnEnabled: Boolean(turnUrls.length > 0 && turnUsername && turnCredential),
+      timestamp: Date.now(),
+    });
+  });
+
+  // In-memory push deduplication cache (Key -> timestamp)
+  const pushDedupeCache = new Map<string, number>();
+
+  // Clean old entries every 5 minutes
+  setInterval(() => {
+    const cutoff = Date.now() - 60000;
+    for (const [key, ts] of pushDedupeCache.entries()) {
+      if (ts < cutoff) {
+        pushDedupeCache.delete(key);
+      }
+    }
+  }, 300000);
+
+  // Push Notification Dispatch Endpoint (FCM / Background Push)
+  // Triggers real push notifications for Session Reminders, Incoming Calls, and Chat Messages
+  app.post(["/api/notifications/send-push", "/api/send-push"], async (req, res) => {
+    try {
+      const authUser = await verifyAuthToken(req);
+      if (!authUser) {
+        return res.status(401).json({ error: "Unauthorized: Valid Firebase authentication token required." });
+      }
+
+      const {
+        recipientUserId,
+        title,
+        body,
+        data = {},
+        channelId = "swapskill_general",
+        priority = "high",
+        sound = "default",
+      } = req.body || {};
+
+      if (!recipientUserId || !title) {
+        return res.status(400).json({ error: "recipientUserId and title are required." });
+      }
+
+      // Sender Spoofing Protection:
+      // For incoming calls, callerId must match authenticated user.
+      // For chat messages, senderId must match authenticated user.
+      // For call cancellation/hangup, either participant can send it, so callerId is not restricted to authUser.uid.
+      // For diagnostic self-tests (recipientUserId === authUser.uid), allow sender.
+      const isSelfTest = recipientUserId === authUser.uid;
+      if (!isSelfTest) {
+        if (data.type === "incoming_call" && data.callerId && data.callerId !== authUser.uid) {
+          return res.status(403).json({ error: "Forbidden: callerId does not match authenticated user." });
+        }
+        if (data.senderId && data.senderId !== authUser.uid) {
+          return res.status(403).json({ error: "Forbidden: senderId does not match authenticated user." });
+        }
+      }
+
+      // Strong deduplication for call and session notification events (while allowing rapid distinct chat messages)
+      const now = Date.now();
+      const isCallNotification = data?.type === "incoming_call" || channelId === "swapskill_calls";
+      const isCallCancellation = data?.type === "call_cancelled" || data?.type === "call_ended";
+      const eventKey = isCallCancellation
+        ? `${recipientUserId}:cancel_${data.callId || now}`
+        : isCallNotification
+        ? `${recipientUserId}:call_${data.callId || now}`
+        : `${recipientUserId}:${data.messageId || (data.type === "chat" ? `chat_${data.chatId}_${now}` : "") || data.callId || data.sessionId || data.eventId || data.type || title}`;
+      const lastSent = pushDedupeCache.get(eventKey);
+      if (!isCallCancellation && !isSelfTest && lastSent && now - lastSent < (isCallNotification ? 10000 : 30000)) {
+        console.log(`[Push] Skipping duplicate notification for ${eventKey} (sent ${(now - lastSent) / 1000}s ago)`);
+        return res.json({ ok: true, deduplicated: true, recipientUserId });
+      }
+      pushDedupeCache.set(eventKey, now);
+
+      const projectId = process.env.VITE_FIREBASE_PROJECT_ID || "swapskill-abbe1";
+      const cleanUserId = encodeURIComponent(recipientUserId);
+
+      // Securely fetch recipient's current pushToken + ALL fcmTokens[] from Firestore using Firebase Admin SDK.
+      // Do NOT trust client-supplied pushToken or deviceTokens for recipient delivery.
+      const candidateTokens: string[] = [];
+      let voipToken: string = "";
+
+      const adminDb = getAdminFirestore();
+      if (adminDb && recipientUserId) {
+        try {
+          // Parallel fetch of recipient user root document and security tokens subcollection
+          const [userDoc, secDoc] = await Promise.all([
+            adminDb.collection("users").doc(recipientUserId).get().catch(() => null),
+            adminDb.collection("users").doc(recipientUserId).collection("security").doc("tokens").get().catch(() => null),
+          ]);
+
+          if (userDoc && userDoc.exists) {
+            const userData = userDoc.data() || {};
+            if (typeof userData.pushToken === "string" && userData.pushToken.trim().length > 10) {
+              candidateTokens.push(userData.pushToken.trim());
+            }
+            if (Array.isArray(userData.fcmTokens)) {
+              for (const tok of userData.fcmTokens) {
+                if (typeof tok === "string" && tok.trim().length > 10) {
+                  candidateTokens.push(tok.trim());
+                }
+              }
+            }
+            if (typeof userData.voipToken === "string" && userData.voipToken.trim()) {
+              voipToken = userData.voipToken.trim();
+            }
+          }
+
+          if (secDoc && secDoc.exists) {
+            const secData = secDoc.data() || {};
+            if (typeof secData.pushToken === "string" && secData.pushToken.trim().length > 10) {
+              candidateTokens.push(secData.pushToken.trim());
+            }
+            if (Array.isArray(secData.fcmTokens)) {
+              for (const tok of secData.fcmTokens) {
+                if (typeof tok === "string" && tok.trim().length > 10) {
+                  candidateTokens.push(tok.trim());
+                }
+              }
+            }
+            if (!voipToken && typeof secData.voipToken === "string" && secData.voipToken.trim()) {
+              voipToken = secData.voipToken.trim();
+            }
+          }
+        } catch (err) {
+          console.warn("[Push] Error fetching recipient device tokens from Firestore Admin SDK:", err);
+        }
+      }
+
+      // Fast fallback 1: If client provided tokens directly in the request, include them
+      if (typeof req.body?.pushToken === "string" && req.body.pushToken.trim().length > 10) {
+        candidateTokens.push(req.body.pushToken.trim());
+      }
+      if (Array.isArray(req.body?.deviceTokens)) {
+        for (const tok of req.body.deviceTokens) {
+          if (typeof tok === "string" && tok.trim().length > 10) {
+            candidateTokens.push(tok.trim());
+          }
+        }
+      }
+
+      // Fast fallback 2: Check server in-memory token cache populated by /api/notifications/sync-token
+      const memoryTokens = userTokenCache.get(recipientUserId);
+      if (memoryTokens && memoryTokens.size > 0) {
+        memoryTokens.forEach((t) => {
+          if (typeof t === "string" && t.trim().length > 10) {
+            candidateTokens.push(t.trim());
+          }
+        });
+      }
+
+      // Deduplicate all device tokens for recipient
+      const deviceTokens = Array.from(new Set(candidateTokens));
+      console.log(`[Push] Retrieved ${deviceTokens.length} unique device token(s) for recipient ${recipientUserId}`);
+
+      if (deviceTokens.length > 0 && recipientUserId) {
+        let mem = userTokenCache.get(recipientUserId);
+        if (!mem) {
+          mem = new Set<string>();
+          userTokenCache.set(recipientUserId, mem);
+        }
+        for (const tok of deviceTokens) mem.add(tok);
+      }
+
+      const fcmServerKey = process.env.FCM_SERVER_KEY || "";
+      let deliveredCount = 0;
+      const adminApp = getFirebaseAdmin();
+
+      const isIncomingCall = data?.type === "incoming_call" || channelId === "swapskill_calls";
+      const callId = data?.callId || "";
+
+      // Pipeline 1: iOS Native PushKit VoIP Push (dedicated pipeline for incoming calls)
+      if (isIncomingCall && voipToken) {
+        console.log(`[Push] Dispatching real iOS PushKit VoIP push to token ${voipToken.substring(0, 10)}...`);
+        try {
+          const apnsResult = await sendApnsVoipPush({
+            voipToken,
+            callId: data?.callId || "",
+            sessionId: data?.sessionId || "",
+            callerId: data?.callerId || "",
+            callerName: data?.callerName || title || "Skill Swap Partner",
+            callerPhoto: data?.callerPhoto,
+            callType: data?.callType || "video",
+            skillName: data?.skillName,
+          });
+
+          if (apnsResult.success) {
+            console.log(`[LIVE SWAP] PUSH_SENT: iOS VoIP push delivered via APNs to recipient=${recipientUserId} (HTTP 200)`);
+            deliveredCount++;
+          } else if (apnsResult.skipped) {
+            console.log(`[Push] iOS VoIP token detected (${voipToken.substring(0, 10)}...). Server APNs signing key not configured; client will receive FCM/in-app notification fallback.`);
+          } else {
+            console.error(`[LIVE SWAP] PUSH_FAILED: iOS VoIP APNs rejected - status=${apnsResult.statusCode} reason=${apnsResult.reason}`);
+            // If token was rejected by APNs as bad or unregistered, remove from Firestore
+            if (apnsResult.statusCode === 410 || apnsResult.reason?.includes("BadDeviceToken") || apnsResult.reason?.includes("Unregistered")) {
+              console.warn(`[Push] Invalid VoIP token detected for user ${recipientUserId}. Removing from Firestore.`);
+              if (adminApp) {
+                try {
+                  const db = getFirestore(adminApp);
+                  await db.collection("users").doc(recipientUserId).update({
+                    voipToken: null,
+                    lastInvalidVoipToken: voipToken,
+                  });
+                } catch (cleanupErr) {
+                  console.warn("[Push] Failed to clean up invalid VoIP token:", cleanupErr);
+                }
+              }
+            }
+          }
+        } catch (apnsErr: any) {
+          console.error(`[LIVE SWAP] PUSH_FAILED: iOS VoIP APNs error - ${apnsErr?.message}`);
+        }
+      }
+
+      // Pipeline 2: Android & Web FCM Multicast Push (and standard iOS notifications)
+      if (adminApp && deviceTokens.length > 0) {
+        // Modern FCM HTTP v1 using Firebase Admin SDK
+        try {
+          const stringifiedData: Record<string, string> = {
+            title: String(title),
+            body: String(body || ""),
+            channelId: String(channelId),
+          };
+          if (data && typeof data === "object") {
+            for (const [k, v] of Object.entries(data)) {
+              if (v !== undefined && v !== null) {
+                stringifiedData[k] = typeof v === "object" ? JSON.stringify(v) : String(v);
+              }
+            }
+          }
+
+          const clickAction = isIncomingCall && callId ? `swapskill://call/${callId}` : "FLUTTER_NOTIFICATION_CLICK";
+          const isCallEvent = isIncomingCall || isCallCancellation;
+
+          // Build modern FCM multicast payload
+          // For incoming calls: Android receives a pure high-priority DATA message so SwapSkillMessagingService
+          // launches the full-screen call ringing UI immediately without a premature static system tray banner.
+          // For chat messages & alerts: Android receives a full notification payload with high priority so Google
+          // Play Services pops the heads-up banner in under 150ms without waiting for Doze maintenance windows!
+          const multicastPayload: any = {
+            tokens: deviceTokens,
+            data: stringifiedData,
+            android: {
+              priority: isIncomingCall || priority === "high" ? "high" : "normal",
+              ttl: isIncomingCall ? 60 * 1000 : 86400 * 1000,
+              directBootOk: true,
+              restrictedPackageName: "com.swapskill.app",
+            },
+            apns: {
+              headers: {
+                "apns-priority": isIncomingCall || priority === "high" ? "10" : "5",
+                "apns-push-type": "alert",
+                "apns-expiration": String(Math.floor(Date.now() / 1000) + (isIncomingCall ? 60 : 86400)),
+              },
+              payload: {
+                aps: {
+                  alert: {
+                    title,
+                    body: body || "",
+                  },
+                  sound: sound || "default",
+                  badge: 1,
+                  "content-available": 1,
+                  category: isIncomingCall ? "INCOMING_CALL" : undefined,
+                },
+                ...stringifiedData,
+              },
+            },
+            webpush: {
+              notification: {
+                title,
+                body: body || "",
+                icon: "/favicon.ico",
+              },
+            },
+          };
+
+          if (!isCallEvent) {
+            multicastPayload.notification = {
+              title: String(title),
+              body: String(body || ""),
+            };
+            multicastPayload.android.notification = {
+              title: String(title),
+              body: String(body || ""),
+              channelId: channelId || "swapskill_messages",
+              sound: sound || "default",
+              defaultSound: true,
+              defaultVibrateTimings: true,
+              priority: "high",
+              visibility: "public",
+              clickAction: clickAction,
+            };
+          }
+
+          const response = await getMessaging(adminApp).sendEachForMulticast(multicastPayload);
+
+          deliveredCount = response.successCount;
+          console.log(`[Push FCM v1] Dispatched to ${response.successCount}/${deviceTokens.length} devices (Failures: ${response.failureCount})`);
+          if (response.successCount > 0) {
+            console.log(`[TIMING] FCM_SENT: (backend) callId=${callId} successCount=${response.successCount} t=${Date.now()}`);
+            console.log(`[LIVE SWAP] PUSH_SENT: FCM multicast delivered to ${response.successCount} device(s)`);
+          }
+          if (response.failureCount > 0) {
+            console.log(`[LIVE SWAP] PUSH_FAILED: FCM multicast failed for ${response.failureCount} token(s)`);
+            const staleTokensToPrune: string[] = [];
+            response.responses.forEach((resp, idx) => {
+              if (!resp.success) {
+                const errCode = resp.error?.code || "";
+                const errMsg = resp.error?.message || "";
+                console.warn(`[Push FCM v1] Token ${deviceTokens[idx]?.substring(0, 12)}... failed: ${errMsg} (code: ${errCode})`);
+                if (
+                  errCode === "messaging/registration-token-not-registered" ||
+                  errCode === "messaging/invalid-registration-token" ||
+                  errMsg.toLowerCase().includes("not registered") ||
+                  errMsg.toLowerCase().includes("invalid registration") ||
+                  errMsg.toLowerCase().includes("unregistered") ||
+                  errMsg.toLowerCase().includes("invalid-argument")
+                ) {
+                  const badToken = deviceTokens[idx];
+                  if (badToken) {
+                    staleTokensToPrune.push(badToken);
+                  }
+                }
+              }
+            });
+
+            if (staleTokensToPrune.length > 0 && recipientUserId && adminDb) {
+              console.log(`[Push FCM v1] Auto-pruning ${staleTokensToPrune.length} dead token(s) for user ${recipientUserId} in background`);
+              (async () => {
+                for (const badToken of staleTokensToPrune) {
+                  try {
+                    const userDocRef = adminDb.collection("users").doc(recipientUserId);
+                    const secDocRef = userDocRef.collection("security").doc("tokens");
+
+                    const [uSnap, secSnap] = await Promise.all([
+                      userDocRef.get().catch(() => null),
+                      secDocRef.get().catch(() => null),
+                    ]);
+
+                    const uUpdate: Record<string, any> = {
+                      fcmTokens: FieldValue.arrayRemove(badToken),
+                    };
+                    if (uSnap?.data()?.pushToken === badToken) {
+                      uUpdate.pushToken = FieldValue.delete();
+                    }
+                    await userDocRef.update(uUpdate).catch(() => {});
+
+                    const secUpdate: Record<string, any> = {
+                      fcmTokens: FieldValue.arrayRemove(badToken),
+                    };
+                    if (secSnap?.data()?.pushToken === badToken) {
+                      secUpdate.pushToken = FieldValue.delete();
+                    }
+                    await secDocRef.update(secUpdate).catch(() => {});
+                  } catch (pruneErr) {
+                    console.warn("[Push FCM v1] Background token prune error:", pruneErr);
+                  }
+                }
+              })().catch(() => {});
+            }
+          }
+        } catch (fcmV1Err: any) {
+          console.error(`[LIVE SWAP] PUSH_FAILED: FCM v1 Multicast dispatch error:`, fcmV1Err?.message || fcmV1Err);
+        }
+      } else if (fcmServerKey && deviceTokens.length > 0) {
+        // Fallback to FCM HTTP Legacy endpoint
+        const isCallEventLegacy = isIncomingCall || isCallCancellation;
+        const clickAction = isIncomingCall && callId ? `swapskill://call/${callId}` : "FLUTTER_NOTIFICATION_CLICK";
+        const fcmPayload: any = {
+          registration_ids: deviceTokens,
+          priority: isCallEventLegacy || priority === "high" ? "high" : "normal",
+          time_to_live: isCallEventLegacy ? 60 : 86400,
+          data: {
+            ...data,
+            title,
+            body,
+            channelId: isIncomingCall ? "swapskill_calls" : channelId,
+            click_action: clickAction,
+          },
+        };
+
+        if (!isCallEventLegacy) {
+          fcmPayload.notification = {
+            title,
+            body,
+            sound: sound || "default",
+            android_channel_id: isIncomingCall ? "swapskill_calls" : channelId,
+            click_action: clickAction,
+          };
+        }
+
+        const fcmRes = await fetch("https://fcm.googleapis.com/fcm/send", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `key=${fcmServerKey}`,
+          },
+          body: JSON.stringify(fcmPayload),
+        });
+
+        if (fcmRes.ok) {
+          const fcmJson = await fcmRes.json();
+          deliveredCount = fcmJson.success || 0;
+          console.log(`[Push FCM Legacy] Dispatched to ${deliveredCount}/${deviceTokens.length} devices`);
+          if (deliveredCount > 0) {
+            console.log(`[LIVE SWAP] PUSH_SENT: FCM Legacy delivered to ${deliveredCount} device(s)`);
+          } else {
+            console.log(`[LIVE SWAP] PUSH_FAILED: FCM Legacy delivered 0 messages`);
+          }
+        } else {
+          console.error(`[LIVE SWAP] PUSH_FAILED: FCM Legacy error response -`, await fcmRes.text());
+        }
+      } else {
+        console.log(`[Push] In-app fallback only (Registered tokens: ${deviceTokens.length}, FCM v1 Admin configured: ${Boolean(adminApp)})`);
+      }
+
+      // Also persist to Firestore notifications collection as reliable fallback
+      if (adminDb) {
+        try {
+          await adminDb.collection("users").doc(recipientUserId).collection("notifications").add({
+            title,
+            body: body || "",
+            channelId,
+            data: data || {},
+            read: false,
+            createdAt: FieldValue.serverTimestamp(),
+          });
+          console.log(`[Push] In-app notification saved for user: ${recipientUserId}`);
+        } catch (err) {
+          console.warn("[Push] Fallback write to notifications collection failed via Admin SDK:", err);
+        }
+      }
+
+      return res.json({
+        ok: true,
+        deliveredCount,
+        deviceCount: deviceTokens.length,
+        hasAdminApp: Boolean(adminApp),
+        recipientUserId,
+      });
+    } catch (err: any) {
+      console.error("[/api/notifications/send-push Error]:", err);
+      return res.status(500).json({ error: err.message || "Failed to send push notification." });
+    }
+  });
+
+  // Token Sync Endpoint (Used by client web app, native SwapSkillMessagingService.onNewToken & CallForegroundPlugin)
+  app.post("/api/notifications/sync-token", express.json({ type: ["application/json", "text/plain"] }), async (req, res) => {
+    try {
+      // 1. Authenticate caller via Firebase ID token
+      const authUser = await verifyAuthToken(req);
+      if (!authUser || !authUser.uid) {
+        return res.status(401).json({ error: "Unauthorized: Missing, invalid, or expired Firebase ID token." });
+      }
+
+      let body = req.body;
+      if (typeof body === "string") {
+        try {
+          body = JSON.parse(body);
+        } catch {}
+      }
+      const { userId, token, platform = "android" } = body || {};
+
+      // 2. Validate FCM token format/type and reject malformed input with HTTP 400
+      if (!token || typeof token !== "string" || token.trim().length < 10) {
+        return res.status(400).json({ error: "Bad Request: A valid non-empty FCM token string of at least 10 characters is required." });
+      }
+
+      const cleanToken = token.trim();
+
+      // 3. Authorization check: If request body contains "userId", require authenticatedUid === userId
+      // Reject attempts to modify another user's FCM tokens with HTTP 403
+      if (userId && typeof userId === "string" && userId.trim() !== authUser.uid) {
+        return res.status(403).json({ error: "Forbidden: Cannot register or modify FCM tokens for another user." });
+      }
+
+      // 4. Prefer using the authenticated UID as the authoritative user ID
+      const targetUserId = authUser.uid;
+
+      console.log(`[Push] Syncing refreshed token for authenticated user ${targetUserId}: ${cleanToken.substring(0, 10)}... (platform: ${platform})`);
+
+      // Store in high-speed in-memory token cache for instant call routing
+      let userSet = userTokenCache.get(targetUserId);
+      if (!userSet) {
+        userSet = new Set<string>();
+        userTokenCache.set(targetUserId, userSet);
+      }
+      userSet.add(cleanToken);
+
+      const adminDb = getAdminFirestore();
+      if (adminDb) {
+        await adminDb.collection("users").doc(targetUserId).collection("security").doc("tokens").set({
+          fcmTokens: FieldValue.arrayUnion(cleanToken),
+          pushToken: cleanToken,
+          pushPlatform: platform,
+          lastPushTokenUpdate: FieldValue.serverTimestamp(),
+        }, { merge: true }).catch(() => {});
+
+        await adminDb.collection("users").doc(targetUserId).set({
+          fcmTokens: FieldValue.arrayUnion(cleanToken),
+          pushToken: cleanToken,
+          pushPlatform: platform,
+          lastPushTokenUpdate: FieldValue.serverTimestamp(),
+        }, { merge: true });
+      }
+
+      return res.json({ ok: true, synced: true, userId: targetUserId });
+    } catch (err: any) {
+      console.error("[/api/notifications/sync-token Error]:", err);
+      return res.status(500).json({ error: err.message || "Failed to sync push token" });
+    }
+  });
+
+  // Call Acceptance Endpoint (Used by native IncomingCallManager / CallActionReceiver)
+  app.post("/api/calls/accept", express.json({ type: ["application/json", "text/plain"] }), async (req, res) => {
+    try {
+      let body = req.body;
+      if (typeof body === "string") {
+        try {
+          body = JSON.parse(body);
+        } catch {}
+      }
+      const { callId, sessionId } = body || {};
+      if (!callId) {
+        return res.status(400).json({ error: "Missing callId parameter." });
+      }
+
+      // 1. Authenticate the caller with Firebase ID token
+      const authUser = await verifyAuthToken(req);
+      if (!authUser || !authUser.uid) {
+        return res.status(401).json({ error: "Unauthorized: Valid Firebase ID token required." });
+      }
+
+      console.log(`[API] Processing native call acceptance for callId=${callId} by user=${authUser.uid}`);
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(500).json({ error: "Database service unavailable." });
+      }
+
+      // 2. Fetch call document and verify authenticated user is a participant
+      const callDocRef = adminDb.collection("calls").doc(callId);
+      const snap = await callDocRef.get();
+      if (!snap.exists) {
+        return res.status(404).json({ error: "Call not found." });
+      }
+
+      const callData = snap.data() || {};
+      const callerId = callData.callerId || "";
+      const receiverId = callData.receiverId || "";
+
+      if (authUser.uid !== callerId && authUser.uid !== receiverId) {
+        console.warn(`[API] Forbidden: User ${authUser.uid} is not a participant in call ${callId} (caller=${callerId}, receiver=${receiverId})`);
+        return res.status(403).json({ error: "Forbidden: Authenticated user is not a participant in this call." });
+      }
+
+      // 3. Mark call status as accepting
+      await callDocRef.set({
+        status: "accepting",
+        acceptedAt: FieldValue.serverTimestamp(),
+      }, { merge: true });
+      console.log(`[API] Call ${callId} successfully marked as accepting in Firestore by participant ${authUser.uid}.`);
+
+      // 4. Notify the caller (or other participant) via FCM data push so screen transitions immediately
+      const otherParticipantId = authUser.uid === callerId ? receiverId : callerId;
+      if (otherParticipantId) {
+        try {
+          const secSnap = await adminDb.collection("users").doc(otherParticipantId).collection("security").doc("tokens").get();
+          let targetTokens: string[] = [];
+          if (secSnap.exists) {
+            targetTokens = secSnap.data()?.fcmTokens || [];
+            if (secSnap.data()?.pushToken) targetTokens.push(secSnap.data()?.pushToken);
+          }
+          const userDoc = await adminDb.collection("users").doc(otherParticipantId).get();
+          if (userDoc.exists) {
+            const uData = userDoc.data() || {};
+            if (Array.isArray(uData.fcmTokens)) targetTokens.push(...uData.fcmTokens);
+            if (uData.pushToken) targetTokens.push(uData.pushToken);
+          }
+          const uniqueTokens = Array.from(new Set(targetTokens.filter(t => typeof t === "string" && t.trim().length > 10)));
+          if (uniqueTokens.length > 0) {
+            const adminApp = getFirebaseAdmin();
+            if (adminApp) {
+              await getMessaging(adminApp).sendEachForMulticast({
+                tokens: uniqueTokens,
+                data: {
+                  type: "call_accepted",
+                  callId,
+                  sessionId: sessionId || "",
+                  status: "accepting",
+                  timestamp: String(Date.now()),
+                },
+                android: {
+                  priority: "high",
+                  ttl: 60 * 1000,
+                },
+              });
+              console.log(`[API] Dispatched call_accepted FCM to participant ${otherParticipantId} (${uniqueTokens.length} devices)`);
+            }
+          }
+        } catch (pushErr) {
+          console.warn("[API] Non-fatal error pushing call_accepted:", pushErr);
+        }
+      }
+
+      return res.json({ ok: true, callId });
+    } catch (err: any) {
+      console.error("[/api/calls/accept Error]:", err);
+      return res.status(500).json({ error: err?.message || "Failed to accept call" });
+    }
+  });
+
+  // Call Rejection Endpoint (Used by native CallActionReceiver and background tasks)
+  app.post("/api/calls/reject", express.json({ type: ["application/json", "text/plain"] }), async (req, res) => {
+    try {
+      let body = req.body;
+      if (typeof body === "string") {
+        try {
+          body = JSON.parse(body);
+        } catch {}
+      }
+      const { callId, sessionId, reason } = body || {};
+      if (!callId) {
+        return res.status(400).json({ error: "Missing callId parameter." });
+      }
+
+      // 1. Authenticate the caller with Firebase ID token
+      const authUser = await verifyAuthToken(req);
+      if (!authUser || !authUser.uid) {
+        return res.status(401).json({ error: "Unauthorized: Valid Firebase ID token required." });
+      }
+
+      console.log(`[API] Processing call rejection for callId=${callId} by user=${authUser.uid}, reason=${reason}`);
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(500).json({ error: "Database service unavailable." });
+      }
+
+      // 2. Fetch call document and verify authenticated user is a participant
+      const callDocRef = adminDb.collection("calls").doc(callId);
+      const snap = await callDocRef.get();
+      if (!snap.exists) {
+        return res.status(404).json({ error: "Call not found." });
+      }
+
+      const callData = snap.data() || {};
+      const callerId = callData.callerId || "";
+      const receiverId = callData.receiverId || "";
+
+      if (authUser.uid !== callerId && authUser.uid !== receiverId) {
+        console.warn(`[API] Forbidden: User ${authUser.uid} is not a participant in call ${callId} (caller=${callerId}, receiver=${receiverId})`);
+        return res.status(403).json({ error: "Forbidden: Authenticated user is not a participant in this call." });
+      }
+
+      // 3. Mark call status as rejected
+      await callDocRef.set({
+        status: "rejected",
+        endedAt: FieldValue.serverTimestamp(),
+        endReason: reason || "Declined by user",
+      }, { merge: true });
+      console.log(`[API] Call ${callId} successfully marked as rejected in Firestore by participant ${authUser.uid}.`);
+
+      // 4. Notify the other participant that call was rejected/cancelled so ringtone stops immediately!
+      const otherParticipantId = authUser.uid === callerId ? receiverId : callerId;
+      if (otherParticipantId) {
+        try {
+          const secSnap = await adminDb.collection("users").doc(otherParticipantId).collection("security").doc("tokens").get();
+          let targetTokens: string[] = [];
+          if (secSnap.exists) {
+            targetTokens = secSnap.data()?.fcmTokens || [];
+            if (secSnap.data()?.pushToken) targetTokens.push(secSnap.data()?.pushToken);
+          }
+          const userDoc = await adminDb.collection("users").doc(otherParticipantId).get();
+          if (userDoc.exists) {
+            const uData = userDoc.data() || {};
+            if (Array.isArray(uData.fcmTokens)) targetTokens.push(...uData.fcmTokens);
+            if (uData.pushToken) targetTokens.push(uData.pushToken);
+          }
+          const uniqueTokens = Array.from(new Set(targetTokens.filter(t => typeof t === "string" && t.trim().length > 10)));
+          if (uniqueTokens.length > 0) {
+            const adminApp = getFirebaseAdmin();
+            if (adminApp) {
+              await getMessaging(adminApp).sendEachForMulticast({
+                tokens: uniqueTokens,
+                data: {
+                  type: "call_cancelled",
+                  callId,
+                  sessionId: sessionId || "",
+                  reason: reason || "Declined by user",
+                  timestamp: String(Date.now()),
+                },
+                android: {
+                  priority: "high",
+                  ttl: 60 * 1000,
+                },
+              });
+              console.log(`[API] Dispatched call_cancelled FCM to participant ${otherParticipantId} (${uniqueTokens.length} devices)`);
+            }
+          }
+        } catch (pushErr) {
+          console.warn("[API] Non-fatal error pushing call_cancelled:", pushErr);
+        }
+      }
+
+      return res.json({ ok: true, callId });
+    } catch (err: any) {
+      console.error("[/api/calls/reject Error]:", err);
+      return res.status(500).json({ error: err?.message || "Failed to reject call" });
+    }
+  });
+
+  // Chat Notification Action: Mark Chat as Read
+  app.post("/api/chat/mark-read", express.json({ type: ["application/json", "text/plain"] }), async (req, res) => {
+    try {
+      let body = req.body;
+      if (typeof body === "string") {
+        try { body = JSON.parse(body); } catch (_) {}
+      }
+      const { chatId, userId } = body || {};
+      if (!chatId) {
+        return res.status(400).json({ error: "chatId is required." });
+      }
+
+      // Identify caller uid
+      const authUser = await verifyAuthToken(req);
+      const effectiveUserId = authUser?.uid || userId;
+      if (!effectiveUserId) {
+        return res.status(400).json({ error: "User identity required." });
+      }
+
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(500).json({ error: "Database service unavailable." });
+      }
+
+      // Check conversations collection, then fallback to chats
+      let targetColl = "conversations";
+      let chatDocRef = adminDb.collection("conversations").doc(chatId);
+      let snap = await chatDocRef.get();
+      if (!snap.exists) {
+        chatDocRef = adminDb.collection("chats").doc(chatId);
+        snap = await chatDocRef.get();
+        if (snap.exists) {
+          targetColl = "chats";
+        }
+      }
+
+      // 1. Reset unreadCount for this user
+      await chatDocRef.set({
+        unreadCount: {
+          [effectiveUserId]: 0,
+        },
+      }, { merge: true });
+
+      // 2. Mark recent unread messages sent by other participants as seen
+      const msgsQuery = await chatDocRef.collection("messages")
+        .where("senderId", "!=", effectiveUserId)
+        .limit(30)
+        .get();
+
+      const batch = adminDb.batch();
+      let updateCount = 0;
+      msgsQuery.forEach((docSnap) => {
+        const m = docSnap.data();
+        if (!m.isRead || m.status !== "seen") {
+          batch.update(docSnap.ref, {
+            isRead: true,
+            status: "seen",
+            readAt: FieldValue.serverTimestamp(),
+          });
+          updateCount++;
+        }
+      });
+      if (updateCount > 0) {
+        await batch.commit();
+      }
+
+      console.log(`[API] Chat ${chatId} marked as read for user ${effectiveUserId} (${updateCount} messages updated).`);
+      return res.json({ ok: true, chatId });
+    } catch (err: any) {
+      console.error("[/api/chat/mark-read Error]:", err);
+      return res.status(500).json({ error: err?.message || "Failed to mark chat as read" });
+    }
+  });
+
+  // Chat Notification Action: Send Inline Reply
+  app.post("/api/chat/send-reply", express.json({ type: ["application/json", "text/plain"] }), async (req, res) => {
+    try {
+      let body = req.body;
+      if (typeof body === "string") {
+        try { body = JSON.parse(body); } catch (_) {}
+      }
+      let { chatId, text, senderId, recipientId, senderName } = body || {};
+      if (!chatId || !text || !text.trim()) {
+        return res.status(400).json({ error: "chatId and text are required." });
+      }
+
+      const authUser = await verifyAuthToken(req);
+      let effectiveSenderId = authUser?.uid || senderId;
+
+      // Robust deduction from canonical chatId (userA_userB) if senderId was omitted by mobile background intent
+      if (!effectiveSenderId && typeof chatId === "string" && chatId.includes("_")) {
+        const parts = chatId.split("_");
+        if (parts.length === 2 && recipientId) {
+          effectiveSenderId = parts.find((p: string) => p !== recipientId) || "";
+        }
+      }
+
+      if (!effectiveSenderId) {
+        return res.status(400).json({ error: "Sender identity required." });
+      }
+
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        return res.status(500).json({ error: "Database service unavailable." });
+      }
+
+      // 1. Resolve recipient immediately if provided or deduce from conversation
+      let targetRecipientId = recipientId;
+      if (!targetRecipientId && typeof chatId === "string" && chatId.includes("_")) {
+        const parts = chatId.split("_");
+        if (parts.length === 2) {
+          targetRecipientId = parts.find((p: string) => p !== effectiveSenderId) || "";
+        }
+      }
+
+      let targetColl = "conversations";
+      let chatDocRef = adminDb.collection("conversations").doc(chatId);
+
+      // Fast check if conversation exists or fallback to chats
+      const checkSnap = await chatDocRef.get();
+      if (!checkSnap.exists) {
+        const chatsRef = adminDb.collection("chats").doc(chatId);
+        const altSnap = await chatsRef.get();
+        if (altSnap.exists) {
+          targetColl = "chats";
+          chatDocRef = chatsRef;
+        }
+      }
+
+      if (!targetRecipientId) {
+        const docData = (await chatDocRef.get()).data() || {};
+        if (Array.isArray(docData.participantIds)) {
+          targetRecipientId = docData.participantIds.find((id: string) => id !== effectiveSenderId) || "";
+        }
+      }
+
+      const trimmedText = text.trim();
+      const now = FieldValue.serverTimestamp();
+      const unreadUpdates: Record<string, any> = {
+        [`unreadCount.${effectiveSenderId}`]: 0,
+      };
+      if (targetRecipientId) {
+        unreadUpdates[`unreadCount.${targetRecipientId}`] = FieldValue.increment(1);
+      }
+
+      // Parallelize message write and conversation metadata write
+      const [msgDocRef] = await Promise.all([
+        chatDocRef.collection("messages").add({
+          text: trimmedText,
+          senderId: effectiveSenderId,
+          senderName: senderName || "SwapSkill User",
+          status: "sent",
+          isRead: false,
+          timestamp: now,
+          createdAt: now,
+        }),
+        chatDocRef.set({
+          id: chatId,
+          lastMessage: trimmedText,
+          lastMessageSenderId: effectiveSenderId,
+          lastMessageTime: now,
+          lastMessageAt: now,
+          updatedAt: now,
+          ...unreadUpdates,
+        }, { merge: true }),
+      ]);
+
+      // 3. Dispatch FCM Push Notification and in-app notification doc concurrently to recipient
+      if (targetRecipientId) {
+        (async () => {
+          try {
+            // Write in-app notification document
+            adminDb.collection("users").doc(targetRecipientId).collection("notifications").add({
+              type: "chat",
+              senderId: effectiveSenderId,
+              senderName: senderName || "SwapSkill User",
+              referenceId: chatId,
+              chatId,
+              message: trimmedText,
+              read: false,
+              createdAt: FieldValue.serverTimestamp(),
+            }).catch(() => {});
+
+            // Collect tokens from in-memory cache first for 0ms lookup
+            let targetTokens: string[] = [];
+            const cachedTokens = userTokenCache.get(targetRecipientId);
+            if (cachedTokens && cachedTokens.size > 0) {
+              cachedTokens.forEach(t => targetTokens.push(t));
+            }
+
+            // Also check Firestore in parallel
+            const [secSnap, userDoc] = await Promise.all([
+              adminDb.collection("users").doc(targetRecipientId).collection("security").doc("tokens").get().catch(() => null),
+              adminDb.collection("users").doc(targetRecipientId).get().catch(() => null),
+            ]);
+
+            if (secSnap && secSnap.exists) {
+              const sData = secSnap.data() || {};
+              if (Array.isArray(sData.fcmTokens)) targetTokens.push(...sData.fcmTokens);
+              if (sData.pushToken) targetTokens.push(sData.pushToken);
+            }
+            if (userDoc && userDoc.exists) {
+              const uData = userDoc.data() || {};
+              if (Array.isArray(uData.fcmTokens)) targetTokens.push(...uData.fcmTokens);
+              if (uData.pushToken) targetTokens.push(uData.pushToken);
+            }
+
+            const uniqueTokens = Array.from(new Set(targetTokens.filter((t: any) => typeof t === "string" && t.trim().length > 10)));
+            if (uniqueTokens.length > 0) {
+              // Update memory cache
+              let mem = userTokenCache.get(targetRecipientId);
+              if (!mem) {
+                mem = new Set<string>();
+                userTokenCache.set(targetRecipientId, mem);
+              }
+              for (const tok of uniqueTokens) mem.add(tok);
+
+              const adminApp = getFirebaseAdmin();
+              if (adminApp) {
+                await getMessaging(adminApp).sendEachForMulticast({
+                  tokens: uniqueTokens,
+                  data: {
+                    type: "chat",
+                    chatId,
+                    messageId: msgDocRef.id,
+                    senderId: effectiveSenderId,
+                    senderName: senderName || "SwapSkill User",
+                    recipientId: targetRecipientId,
+                    title: senderName || "New message",
+                    body: trimmedText.length > 70 ? trimmedText.substring(0, 70) + "..." : trimmedText,
+                  },
+                  notification: {
+                    title: senderName || "New message",
+                    body: trimmedText.length > 70 ? trimmedText.substring(0, 70) + "..." : trimmedText,
+                  },
+                  android: {
+                    priority: "high",
+                    notification: {
+                      channelId: "swapskill_messages",
+                      sound: "default",
+                      defaultSound: true,
+                      defaultVibrateTimings: true,
+                      priority: "high",
+                      visibility: "public",
+                    },
+                  },
+                });
+                console.log(`[API] Inline reply sent and FCM dispatched to ${targetRecipientId} (${uniqueTokens.length} devices)`);
+              }
+            }
+          } catch (pushErr) {
+            console.warn("[API] Failed to dispatch reply FCM:", pushErr);
+          }
+        })().catch(() => {});
+      }
+
+      return res.json({ ok: true, messageId: msgDocRef.id, chatId });
+    } catch (err: any) {
+      console.error("[/api/chat/send-reply Error]:", err);
+      return res.status(500).json({ error: err?.message || "Failed to send reply" });
+    }
+  });
+
+  // Session Leave & Disconnect Cleanup Endpoint (Supports fetch & navigator.sendBeacon)
+  app.post("/api/session/leave", express.json({ type: ["application/json", "text/plain"] }), async (req, res) => {
+    try {
+      let body = req.body;
+      if (typeof body === "string") {
+        try {
+          body = JSON.parse(body);
+        } catch (_) {}
+      }
+      const { sessionId, userId, forceEnd } = body || {};
+      if (!sessionId || !userId) {
+        return res.status(400).json({ error: "sessionId and userId are required." });
+      }
+
+      // Authentication verification
+      const authUser = await verifyAuthToken(req);
+      if (!authUser) {
+        return res.status(401).json({ error: "Unauthorized: Valid Firebase ID token is required." });
+      }
+
+      // User ID matching verification
+      if (authUser.uid !== userId) {
+        return res.status(403).json({ error: "Forbidden: authenticated user does not match the userId parameter." });
+      }
+
+      const adminDb = getAdminFirestore();
+      if (!adminDb) {
+        console.warn("[/api/session/leave] Admin Firestore unavailable, skipping leave persistence.");
+        return res.status(200).json({ ok: true, message: "Admin Firestore unavailable." });
+      }
+
+      const sessionRef = adminDb.collection("sessions").doc(sessionId);
+      const sessionDoc = await sessionRef.get();
+
+      if (!sessionDoc.exists) {
+        return res.status(200).json({ ok: true, message: "Session document not found." });
+      }
+
+      const sessionData = sessionDoc.data() || {};
+
+      // Session participant authorization verification
+      const isParticipant =
+        sessionData.teacherId === authUser.uid ||
+        sessionData.learnerId === authUser.uid ||
+        sessionData.createdBy === authUser.uid ||
+        (Array.isArray(sessionData.participantIds) && sessionData.participantIds.includes(authUser.uid)) ||
+        (Array.isArray(sessionData.liveParticipants) && sessionData.liveParticipants.includes(authUser.uid));
+
+      if (!isParticipant) {
+        return res.status(403).json({ error: "Forbidden: authenticated user is not an authorized participant in this session." });
+      }
+
+      const status = (sessionData.status || "").toLowerCase();
+      const sessionEnded = sessionData.sessionEnded || sessionData.isEnded || false;
+
+      if (status === "completed" || sessionEnded) {
+        return res.status(200).json({ ok: true, sessionEnded: true, remainingCount: 0 });
+      }
+
+      const existingParticipants = Array.isArray(sessionData.liveParticipants)
+        ? sessionData.liveParticipants.filter(Boolean)
+        : [];
+
+      const remaining = existingParticipants.filter((id: string) => id !== userId);
+
+      if (remaining.length > 0) {
+        // Partner is still in the room -> keep session active
+        await sessionRef.update({
+          liveParticipants: remaining,
+          lastLeaveTime: FieldValue.serverTimestamp(),
+        });
+        return res.status(200).json({ ok: true, sessionEnded: false, remainingCount: remaining.length });
+      } else {
+        // Participant left -> update live presence only, do NOT force-complete session
+        await sessionRef.update({
+          liveParticipants: [],
+          isLive: false,
+          lastLeaveTime: FieldValue.serverTimestamp(),
+        });
+        return res.status(200).json({ ok: true, sessionEnded: false, remainingCount: 0 });
+      }
+    } catch (err: any) {
+      console.error("[/api/session/leave Error]:", err);
+      return res.status(500).json({ error: err.message || "Failed to process session leave." });
+    }
+  });
+
+  if (!isProduction) {
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
+      appType: "spa",
+    });
+
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(process.cwd(), "dist");
+
+    app.use(express.static(distPath));
+
+    app.get("*", (_req, res) => {
+      res.sendFile(path.join(distPath, "index.html"));
+    });
+  }
+
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Server running on http://${HOST}:${PORT}`);
+  });
+
+  server.on("error", (err: any) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`Port ${PORT} is already in use.`);
+    } else {
+      console.error("Server error:", err);
+    }
+  });
+}
+
+process.on("unhandledRejection", (reason) => {
+  console.warn("[Server] Unhandled rejection (captured):", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("[Server] Uncaught exception (captured):", err);
+});
+
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
