@@ -1,0 +1,6 @@
+{
+  "name": "SwapSkill",
+  "description": "The world's most premium peer-to-peer skill exchange platform. Learn any skill, teach your crafts, and grow together.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

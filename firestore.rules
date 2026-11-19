@@ -1,0 +1,685 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- Global Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isVerificationAdmin() {
+      return isSignedIn() &&
+        request.auth.token.email == 'zaidnafees8321@gmail.com' &&
+        request.auth.token.email_verified == true;
+    }
+
+    function isValidVerificationRequest(data, reqId) {
+      return data.keys().hasAll([
+          'userId',
+          'status',
+          'category',
+          'domain',
+          'applicantName',
+          'encryptionAlg',
+          'keyVersion',
+          'payloadHash',
+          'encryptedEnvelope',
+          'submittedAt',
+          'submittedAtMs',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'userId',
+          'status',
+          'category',
+          'domain',
+          'applicantName',
+          'applicantUsername',
+          'swapsSnapshot',
+          'ratingSnapshot',
+          'encryptionAlg',
+          'keyVersion',
+          'payloadHash',
+          'encryptedEnvelope',
+          'submittedAt',
+          'submittedAtMs',
+          'updatedAt',
+          'reviewedAt',
+          'reviewedBy',
+          'assignedTier',
+          'badgeLabel',
+          'rejectionReason'
+        ]) &&
+        data.userId is string && data.userId == reqId && data.userId.size() <= 128 &&
+        data.status in ['pending', 'approved', 'rejected', 'revoked'] &&
+        data.category in ['notable', 'skilled', 'educator'] &&
+        data.domain is string && data.domain.size() > 0 && data.domain.size() <= 120 &&
+        data.applicantName is string && data.applicantName.size() > 0 && data.applicantName.size() <= 120 &&
+        (!('applicantUsername' in data) || (data.applicantUsername is string && data.applicantUsername.size() <= 60)) &&
+        (!('swapsSnapshot' in data) || (data.swapsSnapshot is int || data.swapsSnapshot is float)) &&
+        (!('ratingSnapshot' in data) || (data.ratingSnapshot is int || data.ratingSnapshot is float)) &&
+        data.encryptionAlg is string && data.encryptionAlg.size() <= 64 &&
+        data.keyVersion is string && data.keyVersion.size() <= 16 &&
+        data.payloadHash is string && data.payloadHash.size() == 64 &&
+        data.submittedAtMs is int &&
+        data.encryptedEnvelope is map &&
+        data.encryptedEnvelope.keys().hasAll(['v', 'alg', 'encryptedKey', 'iv', 'ciphertext', 'sha256']) &&
+        data.encryptedEnvelope.keys().hasOnly(['v', 'alg', 'encryptedKey', 'iv', 'ciphertext', 'sha256']) &&
+        data.encryptedEnvelope.v == 1 &&
+        data.encryptedEnvelope.alg is string && data.encryptedEnvelope.alg.size() <= 64 &&
+        data.encryptedEnvelope.encryptedKey is string && data.encryptedEnvelope.encryptedKey.size() <= 1024 &&
+        data.encryptedEnvelope.iv is string && data.encryptedEnvelope.iv.size() <= 64 &&
+        data.encryptedEnvelope.ciphertext is string && data.encryptedEnvelope.ciphertext.size() > 0 && data.encryptedEnvelope.ciphertext.size() <= 32768 &&
+        data.encryptedEnvelope.sha256 is string && data.encryptedEnvelope.sha256.size() == 64 &&
+        (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 350)) &&
+        (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 160)) &&
+        (!('assignedTier' in data) || data.assignedTier in ['notable', 'mentor', 'creator', 'verified']) &&
+        (!('badgeLabel' in data) || (data.badgeLabel is string && data.badgeLabel.size() <= 64));
+    }
+
+    // Health check & test connectivity (Read-only, writes blocked)
+    match /test/{testId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // 1. Users Collection
+    match /users/{userId} {
+      // Profiles are readable only by authenticated users (never unauthenticated web scrapers)
+      allow read: if isSignedIn();
+      
+      // Creating user profile (Self only upon signup - verification fields strictly forbidden)
+      allow create: if isOwner(userId) &&
+        request.resource.data.get('verified', false) == false &&
+        !('verifiedBy' in request.resource.data) &&
+        !('verifiedAt' in request.resource.data) &&
+        !('verificationTier' in request.resource.data) &&
+        !('verificationBadgeLabel' in request.resource.data) &&
+        !('verificationStatus' in request.resource.data);
+      
+      // Updating user profile:
+      // Case A: Owner can update their own profile; uid & admin-controlled verification fields remain locked
+      // Case B: Verified Admin can grant/revoke verification badge & status fields
+      // Case C: Non-owners can ONLY update via exact, bounded actions (follower count or verified session reviews)
+      allow update: if (
+        isOwner(userId) &&
+        request.resource.data.uid == resource.data.uid &&
+        !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'verified',
+          'verifiedBy',
+          'verifiedAt',
+          'verificationTier',
+          'verificationBadgeLabel',
+          'verificationStatus'
+        ])
+      ) || (
+        isVerificationAdmin() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'verified',
+          'verifiedBy',
+          'verifiedAt',
+          'verificationTier',
+          'verificationBadgeLabel',
+          'verificationStatus',
+          'points'
+        ])
+      ) || (
+        isSignedIn() && (
+          // Action 1: Following/unfollowing another user (strictly increment or decrement followersCount by 1 only)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['followersCount']) &&
+            (
+              request.resource.data.followersCount == resource.data.followersCount + 1 ||
+              request.resource.data.followersCount == resource.data.followersCount - 1
+            )
+          ) ||
+          // Action 2: Submitting a verified review after a completed swap session
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['rating', 'reviewCount', 'points', 'swapsCompleted']) &&
+            request.resource.data.reviewCount == resource.data.reviewCount + 1 &&
+            request.resource.data.swapsCompleted == resource.data.swapsCompleted + 1 &&
+            request.resource.data.points == resource.data.points + 20 &&
+            request.resource.data.rating >= 1.0 &&
+            request.resource.data.rating <= 5.0
+          )
+        )
+      );
+      
+      allow delete: if isOwner(userId);
+      
+      // Followers Nested Collection
+      match /followers/{followerId} {
+        allow read: if isSignedIn();
+        allow create, delete: if isSignedIn() && request.auth.uid == followerId;
+      }
+
+      // Following Nested Collection
+      match /following/{followingId} {
+        allow read: if isSignedIn();
+        allow create, delete: if isOwner(userId);
+      }
+
+      // Notifications Nested Collection
+      match /notifications/{notificationId} {
+        allow read, update, delete: if isOwner(userId);
+        allow create: if isSignedIn(); // Authenticated users can send notifications to this user
+      }
+
+      // Saved Profiles Nested Collection
+      match /savedProfiles/{savedId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      // Blocked Users Nested Collection (Only owner or the specific blocked user can inspect)
+      match /blockedUsers/{blockedId} {
+        allow read: if isOwner(userId) || (isSignedIn() && request.auth.uid == blockedId);
+        allow write: if isOwner(userId);
+      }
+
+      // Availability Nested Collection
+      match /availability/{availId} {
+        allow read: if isSignedIn();
+        allow write: if isOwner(userId);
+      }
+
+      // Security & Private Nested Collections (Strictly owner only)
+      match /security/{secId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /loginHistory/{historyId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /activeDevices/{deviceId} {
+        allow read, write: if isOwner(userId);
+      }
+
+      match /trustedDevices/{deviceId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // 2. Profiles Collection (Extra profile details, links, etc.)
+    match /profiles/{profileId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(profileId);
+    }
+
+    // 3. Skills Collection (Platform skill catalog)
+    match /skills/{skillId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && (
+        request.resource.data.get('creatorId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid ||
+        !('creatorId' in request.resource.data)
+      );
+      allow update, delete: if isSignedIn() && (
+        resource.data.get('creatorId', '') == request.auth.uid ||
+        resource.data.get('userId', '') == request.auth.uid
+      );
+    }
+
+    // 4. UserSkills Collection
+    match /userSkills/{userSkillId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.get('userId', '') == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.get('userId', '') == request.auth.uid;
+    }
+
+    // 5. ChatRooms (chats) Collection
+    match /chats/{chatId} {
+      allow read, write: if isSignedIn();
+      
+      // Messages Nested Collection
+      match /messages/{messageId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // 5b. conversations (Symmetrical real-time messaging engine)
+    match /conversations/{conversationId} {
+      allow read, write: if isSignedIn();
+      
+      // Messages Nested Collection
+      match /messages/{messageId} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // 5c. conversationMembers Collection
+    match /conversationMembers/{memberId} {
+      allow read, write: if isSignedIn() && (
+        resource == null ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid
+      );
+    }
+
+    // 5d. typingStatus Collection
+    match /typingStatus/{conversationId} {
+      allow read, write: if isSignedIn();
+    }
+
+    // 5e. readReceipts Collection
+    match /readReceipts/{receiptId} {
+      allow read, write: if isSignedIn() && (
+        resource == null ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid
+      );
+    }
+
+    // 5f. userPresence Collection (Only the user can write their own presence)
+    match /userPresence/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId);
+    }
+
+    // 6. Bookings & Sessions Collections
+    match /bookings/{bookingId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.get('learnerId', '') == request.auth.uid ||
+        resource.data.get('teacherId', '') == request.auth.uid ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid])
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.get('learnerId', '') == request.auth.uid ||
+        request.resource.data.get('teacherId', '') == request.auth.uid ||
+        request.resource.data.get('userId', '') == request.auth.uid ||
+        request.resource.data.get('participantIds', []).hasAny([request.auth.uid])
+      );
+      allow update, delete: if isSignedIn() && (
+        resource.data.get('learnerId', '') == request.auth.uid ||
+        resource.data.get('teacherId', '') == request.auth.uid ||
+        resource.data.get('userId', '') == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid])
+      );
+    }
+
+    // Sessions Collection (Restricted strictly to actual session participants)
+    match /sessions/{sessionId} {
+      allow read: if isSignedIn() && (
+        resource == null ||
+        resource.data.teacherId == request.auth.uid ||
+        resource.data.learnerId == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid]) ||
+        resource.data.get('createdBy', '') == request.auth.uid
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.teacherId == request.auth.uid ||
+        request.resource.data.learnerId == request.auth.uid ||
+        request.resource.data.get('participantIds', []).hasAny([request.auth.uid]) ||
+        request.resource.data.get('createdBy', '') == request.auth.uid
+      );
+      allow update: if isSignedIn() && (
+        resource.data.teacherId == request.auth.uid ||
+        resource.data.learnerId == request.auth.uid ||
+        resource.data.get('participantIds', []).hasAny([request.auth.uid]) ||
+        resource.data.get('createdBy', '') == request.auth.uid
+      );
+      allow delete: if isSignedIn() && (
+        resource.data.teacherId == request.auth.uid ||
+        resource.data.learnerId == request.auth.uid ||
+        resource.data.get('createdBy', '') == request.auth.uid
+      );
+    }
+
+    // 7. Reviews Collection (Verified Feedback Ledger)
+    match /reviews/{reviewId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.reviewerId;
+      allow update, delete: if isSignedIn() && request.auth.uid == resource.data.reviewerId;
+    }
+
+    // 8. Reports Collection (Confidential Whistleblower Reporting)
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && request.resource.data.reporterId == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    // 9. Countries Collection (Read-only catalog for signed-in users)
+    match /countries/{countryId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // 10. Languages Collection (Read-only catalog for signed-in users)
+    match /languages/{langId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // 11. LoginLogs Collection (Immutable Audit Logs)
+    match /loginLogs/{logId} {
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+
+    // 12. Calls & Signaling (High reliability for real-time WebRTC audio & video calls)
+    match /calls/{callId} {
+      allow read, write: if true;
+
+      // WebRTC ICE Candidate Subcollections (callerCandidates / calleeCandidates / receiverCandidates)
+      match /{subcollection}/{candId} {
+        allow read, write: if true;
+      }
+    }
+
+    // 13. Call History (Restricted strictly to participants)
+    match /callHistory/{historyId} {
+      allow read, update, delete: if isSignedIn() && (
+        resource == null ||
+        resource.data.callerId == request.auth.uid ||
+        resource.data.receiverId == request.auth.uid ||
+        resource.data.userId == request.auth.uid
+      );
+      allow create: if isSignedIn() && (
+        request.resource.data.callerId == request.auth.uid ||
+        request.resource.data.receiverId == request.auth.uid ||
+        request.resource.data.userId == request.auth.uid
+      );
+    }
+
+    // 14. Verification Requests (Encrypted dossiers — Strictly Owner get/submit, Admin review/list)
+    match /verificationRequests/{requestId} {
+      allow get: if isValidId(requestId) && (isOwner(requestId) || isVerificationAdmin());
+      allow list: if isVerificationAdmin();
+      allow create: if isValidId(requestId) &&
+        isOwner(requestId) &&
+        request.auth.token.email_verified == true &&
+        isValidVerificationRequest(request.resource.data, requestId) &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.submittedAt == request.time &&
+        request.resource.data.updatedAt == request.time &&
+        !('reviewedBy' in request.resource.data) &&
+        !('reviewedAt' in request.resource.data) &&
+        !('assignedTier' in request.resource.data) &&
+        !('badgeLabel' in request.resource.data);
+      allow update: if (
+        isValidId(requestId) &&
+        isOwner(requestId) &&
+        request.auth.token.email_verified == true &&
+        isValidVerificationRequest(request.resource.data, requestId) &&
+        request.resource.data.userId == resource.data.userId &&
+        resource.data.status != 'approved' &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.submittedAt == request.time &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'userId',
+          'status',
+          'category',
+          'domain',
+          'applicantName',
+          'applicantUsername',
+          'swapsSnapshot',
+          'ratingSnapshot',
+          'encryptionAlg',
+          'keyVersion',
+          'payloadHash',
+          'encryptedEnvelope',
+          'submittedAt',
+          'submittedAtMs',
+          'updatedAt',
+          'rejectionReason'
+        ])
+      ) || (
+        isValidId(requestId) &&
+        isVerificationAdmin() &&
+        isValidVerificationRequest(request.resource.data, requestId) &&
+        request.resource.data.userId == resource.data.userId &&
+        request.resource.data.updatedAt == request.time &&
+        request.resource.data.reviewedAt == request.time &&
+        request.resource.data.reviewedBy == 'zaidnafees8321@gmail.com' &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'assignedTier',
+          'badgeLabel',
+          'rejectionReason',
+          'reviewedAt',
+          'reviewedBy',
+          'updatedAt'
+        ])
+      );
+      allow delete: if isValidId(requestId) && isVerificationAdmin();
+    }
+
+    // 15. Skill Battles Helpers & Collections
+    function isBattleAdmin() {
+      return isVerificationAdmin();
+    }
+
+    function isNotBattleSuspended() {
+      return !exists(/databases/$(database)/documents/battleSuspensions/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/battleSuspensions/$(request.auth.uid)).data.active != true;
+    }
+
+    function isBattleParticipantOrJudge(battleData) {
+      return isSignedIn() && (
+        battleData.creatorId == request.auth.uid ||
+        battleData.opponentId == request.auth.uid ||
+        (battleData.participantIds is list && request.auth.uid in battleData.participantIds) ||
+        (battleData.judgeIds is list && request.auth.uid in battleData.judgeIds)
+      );
+    }
+
+    // 15A. Battles
+    match /battles/{battleId} {
+      allow read: if isSignedIn() && (
+        resource.data.visibility == 'public' ||
+        isBattleParticipantOrJudge(resource.data) ||
+        isBattleAdmin()
+      );
+      allow create: if isValidId(battleId) &&
+        isSignedIn() &&
+        isNotBattleSuspended() &&
+        request.resource.data.creatorId == request.auth.uid &&
+        request.resource.data.title is string &&
+        request.resource.data.title.size() >= 3 &&
+        request.resource.data.title.size() <= 140 &&
+        request.resource.data.durationMinutes is number &&
+        request.resource.data.durationMinutes >= 1 &&
+        request.resource.data.durationMinutes <= 180;
+      allow update: if isSignedIn() && (
+        isBattleAdmin() ||
+        isBattleParticipantOrJudge(resource.data) ||
+        // Open battle challenger join
+        (
+          resource.data.mode == 'open' &&
+          resource.data.status == 'open' &&
+          resource.data.opponentId == null &&
+          isNotBattleSuspended() &&
+          request.resource.data.opponentId == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'opponentId', 'opponentName', 'opponentUsername', 'opponentPhoto',
+            'opponentVerified', 'inviteStatus', 'participantIds', 'competitorB',
+            'status', 'updatedAtMs'
+          ])
+        ) ||
+        // Spectators/voters updating live engagement counters cleanly
+        (
+          resource.data.visibility == 'public' &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'viewerCount', 'applauseCount', 'audienceVotesA', 'audienceVotesB', 'updatedAtMs'
+          ])
+        )
+      );
+      allow delete: if isBattleAdmin() || (
+        isSignedIn() &&
+        resource.data.creatorId == request.auth.uid &&
+        resource.data.status in ['pending_invite', 'open', 'cancelled']
+      );
+    }
+
+    // 15B. Battle Participants
+    match /battleParticipants/{participantId} {
+      allow read: if isSignedIn();
+      allow create, update: if isValidId(participantId) && isSignedIn() && (
+        isBattleAdmin() ||
+        request.resource.data.userId == request.auth.uid ||
+        get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data.creatorId == request.auth.uid
+      );
+      allow delete: if isBattleAdmin();
+    }
+
+    // 15C. Battle Viewers
+    match /battleViewers/{viewerId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() &&
+        request.resource.data.userId == request.auth.uid &&
+        viewerId == (request.resource.data.battleId + '_' + request.auth.uid);
+      allow delete: if isSignedIn() && (
+        resource.data.userId == request.auth.uid ||
+        isBattleAdmin()
+      );
+    }
+
+    // 15D. Battle Votes (Strict 1 vote per user per battle)
+    match /battleVotes/{voteId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        isNotBattleSuspended() &&
+        request.resource.data.voterId == request.auth.uid &&
+        voteId == (request.resource.data.battleId + '_' + request.auth.uid) &&
+        !exists(/databases/$(database)/documents/battleVotes/$(voteId)) &&
+        exists(/databases/$(database)/documents/battles/$(request.resource.data.battleId)) &&
+        get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data.allowAudienceVoting == true &&
+        get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data.status in ['live', 'judging'];
+      allow update, delete: if isBattleAdmin();
+    }
+
+    // 15E. Verified Battle Judges
+    match /battleJudges/{judgeId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isBattleAdmin();
+    }
+
+    // 15F. Judge Applications
+    match /battleJudgeApplications/{applicationId} {
+      allow get: if isValidId(applicationId) && (isOwner(applicationId) || isBattleAdmin());
+      allow list: if isBattleAdmin();
+      allow create: if isValidId(applicationId) &&
+        isOwner(applicationId) &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.status == 'pending';
+      allow update: if (
+        isValidId(applicationId) &&
+        isOwner(applicationId) &&
+        resource.data.status != 'approved' &&
+        request.resource.data.status == 'pending' &&
+        request.resource.data.userId == request.auth.uid
+      ) || isBattleAdmin();
+      allow delete: if isBattleAdmin();
+    }
+
+    // 15G. Battle Scores (Assigned Judge or Admin only, immutable once locked)
+    match /battleScores/{scoreId} {
+      allow read: if isSignedIn();
+      allow create: if isValidId(scoreId) && isSignedIn() && (
+        isBattleAdmin() ||
+        (
+          request.resource.data.judgeId == request.auth.uid &&
+          scoreId == (request.resource.data.battleId + '_' + request.auth.uid) &&
+          exists(/databases/$(database)/documents/battles/$(request.resource.data.battleId)) &&
+          request.auth.uid in get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data.judgeIds
+        )
+      );
+      allow update: if isBattleAdmin() || (
+        isSignedIn() &&
+        resource.data.judgeId == request.auth.uid &&
+        resource.data.locked != true
+      );
+      allow delete: if isBattleAdmin();
+    }
+
+    // 15H. Battle Results (Atomic write-once unless overridden by Admin)
+    match /battleResults/{resultId} {
+      allow read: if isSignedIn();
+      allow create: if isValidId(resultId) &&
+        resultId == request.resource.data.battleId &&
+        !exists(/databases/$(database)/documents/battleResults/$(resultId)) &&
+        isSignedIn() && (
+          isBattleAdmin() ||
+          isBattleParticipantOrJudge(get(/databases/$(database)/documents/battles/$(resultId)).data)
+        );
+      allow update, delete: if isBattleAdmin();
+    }
+
+    // 15I. Battle Reports & Disputes
+    match /battleReports/{reportId} {
+      allow create: if isSignedIn() &&
+        request.resource.data.reporterId == request.auth.uid &&
+        request.resource.data.status == 'open';
+      allow read: if isBattleAdmin() || (isSignedIn() && resource.data.reporterId == request.auth.uid);
+      allow update, delete: if isBattleAdmin();
+    }
+
+    // 15J. Battle Rewards
+    match /battleRewards/{rewardId} {
+      allow read: if isSignedIn();
+      allow create: if isValidId(rewardId) &&
+        !exists(/databases/$(database)/documents/battleRewards/$(rewardId)) &&
+        isSignedIn() && (
+          isBattleAdmin() ||
+          isBattleParticipantOrJudge(get(/databases/$(database)/documents/battles/$(request.resource.data.battleId)).data)
+        );
+      allow update, delete: if isBattleAdmin();
+    }
+
+    // 15K. Battle Arena Live Comments
+    match /battleComments/{commentId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() &&
+        isNotBattleSuspended() &&
+        request.resource.data.authorId == request.auth.uid &&
+        request.resource.data.text is string &&
+        request.resource.data.text.size() >= 1 &&
+        request.resource.data.text.size() <= 500;
+      allow delete: if isBattleAdmin() || (isSignedIn() && resource.data.authorId == request.auth.uid);
+    }
+
+    // 15L. Competitive Battle Profiles (XP, W/L, Badges, Judge Status mirror)
+    match /battleProfiles/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isValidId(userId) && isSignedIn() && (
+        isBattleAdmin() ||
+        isOwner(userId) ||
+        (
+          request.resource.data.lastBattleId is string &&
+          exists(/databases/$(database)/documents/battles/$(request.resource.data.lastBattleId)) &&
+          isBattleParticipantOrJudge(get(/databases/$(database)/documents/battles/$(request.resource.data.lastBattleId)).data)
+        )
+      );
+      allow delete: if isBattleAdmin();
+    }
+
+    // 15M. Battle Settings (Categories & Reward Rules)
+    match /battleSettings/{settingId} {
+      allow read: if isSignedIn();
+      allow write: if isBattleAdmin();
+    }
+
+    // 15N. Battle Suspensions
+    match /battleSuspensions/{userId} {
+      allow read: if isOwner(userId) || isBattleAdmin();
+      allow write: if isBattleAdmin();
+    }
+
+    // 16. Global Catch-all Default-Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
